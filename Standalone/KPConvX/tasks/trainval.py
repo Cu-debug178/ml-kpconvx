@@ -59,6 +59,7 @@ def train_and_validate(net, training_loader, val_loader, cfg, chkp_path=None, fi
 
     # Epochs and steps
     epoch = 0
+    resuming = chkp_path is not None and not finetune
 
     # Choose to train on CPU or GPU
     if on_gpu and torch.cuda.is_available():
@@ -137,9 +138,11 @@ def train_and_validate(net, training_loader, val_loader, cfg, chkp_path=None, fi
 
     if cfg.exp.saving:
 
-        # Training log file
-        with open(join(cfg.exp.log_dir, 'training.txt'), "w") as file:
-            file.write('epochs steps out_loss offset_loss train_accuracy time\n')
+        # Keep the complete record when continuing an interrupted experiment.
+        training_log = join(cfg.exp.log_dir, 'training.txt')
+        if not resuming or not exists(training_log):
+            with open(training_log, "w") as file:
+                file.write('epochs steps out_loss offset_loss train_accuracy time\n')
 
         # Killing file (simply delete this file when you want to stop the training)
         PID_file = join(cfg.exp.log_dir, 'running_PID.txt')
@@ -167,7 +170,7 @@ def train_and_validate(net, training_loader, val_loader, cfg, chkp_path=None, fi
     t0 = time.time()
 
     # Start global loop
-    for epoch in range(cfg.train.max_epoch):
+    for epoch in range(epoch, cfg.train.max_epoch):
 
         # Perform one epoch of training
         finished_epoch = False

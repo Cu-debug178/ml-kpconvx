@@ -83,7 +83,7 @@ def training_epoch(epoch, t0, net, optimizer, training_loader, cfg, PID_file, de
 
             # Move batch to GPU
             if 'cuda' in device.type:
-                batch.to(device)
+                batch.to(device, non_blocking=True)
 
             # Update effective batch size
             mean_f = max(0.02, 1.0 / (step + 1))
@@ -283,7 +283,7 @@ def training_epoch_debug(epoch, net, optimizer, training_loader, cfg, PID_file, 
 
             # Move batch to GPU
             if 'cuda' in device.type:
-                batch.to(device)
+                batch.to(device, non_blocking=True)
 
             if 'cuda' in device.type:
                 torch.cuda.synchronize(device)
@@ -357,7 +357,6 @@ def training_epoch_debug(epoch, net, optimizer, training_loader, cfg, PID_file, 
     all_cuda_stats = np.array(all_cuda_stats, dtype=np.float32)
     
     return all_cuda_stats
-
 
 
 

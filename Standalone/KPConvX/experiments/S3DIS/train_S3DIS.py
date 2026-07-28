@@ -25,7 +25,12 @@ import sys
 import time
 import signal
 import argparse
+import random
 import numpy as np
+
+# Set before importing torch so the CUDA allocator uses expandable segments.
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
+
 import torch
 from torch.utils.data import DataLoader
 
@@ -41,7 +46,7 @@ current = os.path.dirname(os.path.realpath(__file__))
 parent = os.path.dirname(os.path.dirname(current))
 sys.path.append(parent)
 
-from utils.config import init_cfg, save_cfg, get_directories
+from utils.config import init_cfg, load_cfg, save_cfg, get_directories
 from utils.printing import frame_lines_1, underline
 from utils.gpu_init import init_gpu
 
@@ -71,6 +76,7 @@ def my_config():
     """
 
     cfg = init_cfg()
+    cfg.exp.seed = 57106803  # Match the aligned Pointcept S3DIS Area_5 baseline.
 
     # Network parameters
     # ------------------
@@ -242,6 +248,17 @@ def my_config():
     return cfg
 
 
+def set_seed(seed):
+    """Seed the RNGs used by model initialization and data loading."""
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+
 def adjust_config(cfg):
 
     # Model
@@ -296,6 +313,9 @@ def adjust_config(cfg):
 #       \***************/
 #
 if __name__ == '__main__':
+
+    cfg = my_config()
+    set_seed(cfg.exp.seed)
 
     # First create a tensor on GPU to signal that we use it
     device = init_gpu()
@@ -371,10 +391,43 @@ if __name__ == '__main__':
     # Log path special arg
     parser.add_argument('--dataset_path', type=str)
     parser.add_argument('--log_path', type=str)
+    parser.add_argument('--resume_path', type=str,
+                        help='Checkpoint from which to resume an interrupted training run.')
     args = parser.parse_args()
 
-    # Configuration parameters
-    cfg = my_config()
+    resume_path = None
+    if args.resume_path is not None:
+        resume_path = os.path.abspath(args.resume_path)
+        if not os.path.isfile(resume_path):
+            parser.error('Checkpoint not found: {:s}'.format(resume_path))
+
+        checkpoint_dir = os.path.dirname(resume_path)
+        resume_log_path = os.path.dirname(checkpoint_dir)
+        if os.path.basename(checkpoint_dir) != 'checkpoints':
+            parser.error('Expected checkpoint to be in a checkpoints directory: {:s}'.format(resume_path))
+        if args.log_path is not None and os.path.abspath(args.log_path) != resume_log_path:
+            parser.error('--log_path must match the checkpoint experiment directory when resuming.')
+
+        cfg = load_cfg(resume_log_path)
+        if os.path.abspath(cfg.exp.log_dir) != resume_log_path:
+            parser.error('Checkpoint and saved configuration refer to different experiment directories.')
+        if args.dataset_path is not None and os.path.realpath(args.dataset_path) != os.path.realpath(cfg.data.path):
+            parser.error('--dataset_path differs from the dataset recorded by the checkpoint.')
+
+        changed_args = []
+        for all_args in [str_args, float_args, int_args, list_args, bool_args]:
+            for arg_name in all_args:
+                key2 = arg_name.split('.')[1]
+                if getattr(args, key2) is not None:
+                    changed_args.append('--' + key2)
+        if changed_args:
+            parser.error('Training-configuration overrides are not allowed when resuming: {:s}'.format(
+                ', '.join(changed_args)))
+
+        # Keep the original data and experiment paths through the normal setup.
+        args.dataset_path = cfg.data.path
+        args.log_path = cfg.exp.log_dir
+        set_seed(cfg.exp.seed)
 
     # Load data parameters
     if args.dataset_path is not None:
@@ -428,14 +481,17 @@ if __name__ == '__main__':
                                 chosen_set='validation',
                                 precompute_pyramid=True)
     
-    # Calib from training data
-    training_dataset.calib_batch(cfg, update_test=False)
-    training_dataset.calib_neighbors(cfg)
+    # Calibration mutates batch_limit and neighbor_limits. A resumed run must reuse
+    # the values recorded by the original experiment.
+    if resume_path is None:
+        training_dataset.calib_batch(cfg, update_test=False)
+        training_dataset.calib_neighbors(cfg)
     test_dataset.b_n = cfg.test.batch_size
     test_dataset.b_lim = cfg.test.batch_limit
 
-    # Save configuration now that it is complete
-    save_cfg(cfg)
+    # Do not rewrite the original configuration record when resuming.
+    if resume_path is None:
+        save_cfg(cfg)
     
     # Initialize samplers
     training_sampler = SceneSegSampler(training_dataset)
@@ -448,14 +504,16 @@ if __name__ == '__main__':
                                  collate_fn=SceneSegCollate,
                                  num_workers=cfg.train.num_workers,
                                  persistent_workers=False,
-                                 pin_memory=False)
+                                 pin_memory=True,
+                                 prefetch_factor=4)
     test_loader = DataLoader(test_dataset,
                              batch_size=1,
                              sampler=test_sampler,
                              collate_fn=SceneSegCollate,
                              num_workers=cfg.test.num_workers,
                              persistent_workers=False,
-                             pin_memory=False)
+                             pin_memory=True,
+                             prefetch_factor=2)
 
 
     ###############
@@ -506,5 +564,5 @@ if __name__ == '__main__':
     # Start training
     print('\n')
     frame_lines_1(['Training and Validation'])
-    train_and_validate(net, training_loader, test_loader, cfg, on_gpu=True)
-
+    train_and_validate(net, training_loader, test_loader, cfg,
+                       chkp_path=resume_path, on_gpu=True)

@@ -1243,16 +1243,16 @@ class SceneSegBatch:
 
         return self
 
-    def to(self, device):
+    def to(self, device, non_blocking=False):
         """
         Manual convertion to a different device.
         """
 
         for var_name, var_value in self.in_dict.items():
             if isinstance(var_value, list):
-                self.in_dict[var_name] = [list_item.to(device) for list_item in var_value]
+                self.in_dict[var_name] = [list_item.to(device, non_blocking=non_blocking) for list_item in var_value]
             else:
-                self.in_dict[var_name] = var_value.to(device)
+                self.in_dict[var_name] = var_value.to(device, non_blocking=non_blocking)
 
         return self
 
@@ -1263,5 +1263,4 @@ class SceneSegBatch:
 
 def SceneSegCollate(batch_data):
     return SceneSegBatch(batch_data)
-
 
