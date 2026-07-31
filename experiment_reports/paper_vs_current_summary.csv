@@ -1,0 +1,12 @@
+dataset,split,source,model,variant,metric,reported_value,unit,seed_or_runs,comparability,notes
+S3DIS,Area_5,paper_2405.13194,KPConvX-L,paper_main_result,mIoU,73.5,percent,not_reported,reference,paper Table 1
+S3DIS,Area_5,paper_2405.13194,KPConvX-L,paper_main_result,mAcc,78.7,percent,not_reported,reference,paper Table 1
+S3DIS,Area_5,paper_2405.13194,KPConvX-L,paper_main_result,OA,91.7,percent,not_reported,reference,paper Table 1
+S3DIS,Area_5,current_run,KPConvX-L,final_10_vote,fullcloud_mIoU,71.4,percent,seed_57106803,partially_comparable,Area 5; current report has no directly comparable current mAcc/OA
+S3DIS,Area_5,current_run,KPConvX-L,best_validation,validation_mIoU,75.7385,percent,seed_57106803,partially_comparable,selected on Area 5 validation
+ScanObjectNN,PB_T50_RS,paper_2405.13194,KPNeXt-L,paper_average,OA,88.9,percent,10_retrains,not_comparable,current run uses main_split
+ScanObjectNN,PB_T50_RS,paper_2405.13194,KPNeXt-L,paper_average,mAcc,87.3,percent,10_retrains,not_comparable,current run uses main_split
+ScanObjectNN,PB_T50_RS,paper_2405.13194,KPNeXt-L,paper_best,OA,89.3,percent,10_retrains,not_comparable,current run uses main_split
+ScanObjectNN,PB_T50_RS,paper_2405.13194,KPNeXt-L,paper_best,mAcc,88.1,percent,10_retrains,not_comparable,current run uses main_split
+ScanObjectNN,main_split,current_run,KPConvX-L,epoch_199_10_vote,OA,89.3,percent,seed_57106803,not_comparable,current split differs from paper PB_T50_RS
+ScanObjectNN,main_split,current_run,KPConvX-L,epoch_199_10_vote,mAcc,88.2,percent,seed_57106803,not_comparable,current split differs from paper PB_T50_RS

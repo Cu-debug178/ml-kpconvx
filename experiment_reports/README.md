@@ -24,6 +24,13 @@ Each run directory must include:
 - `metrics.csv`: machine-readable results with units in column names;
 - optional small tables for class metrics, resource use, or sanitized settings.
 
+## Downloadable CSV
+
+- [All current checkpoint tests](./all_test_results.csv): normalized table with
+  44 rows from S3DIS and ScanObjectNN.
+- [Paper versus current summary](./paper_vs_current_summary.csv): headline values
+  from arXiv:2405.13194 and current runs, with explicit comparability labels.
+
 Use [REPORT_TEMPLATE.md](./REPORT_TEMPLATE.md) for new runs and validate changes
 with:
 
