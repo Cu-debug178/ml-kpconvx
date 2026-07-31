@@ -80,12 +80,24 @@ def train_and_validate(net, training_loader, val_loader, cfg, chkp_path=None, fi
     # Initialize optimizer
     ######################
     
-    # Optimizer with specific learning rate for deformable KPConv
-    deform_params = [v for k, v in net.named_parameters() if 'offset_' in k]
-    other_params = [v for k, v in net.named_parameters() if 'offset_' not in k]
+    # Optimizer with specific learning rate for deformable KPConv. Exclude the
+    # frozen backbone during adapter/head-only fine-tuning.
+    deform_params = [
+        v for k, v in net.named_parameters()
+        if v.requires_grad and 'offset_' in k
+    ]
+    other_params = [
+        v for k, v in net.named_parameters()
+        if v.requires_grad and 'offset_' not in k
+    ]
     deform_lr = cfg.train.lr * cfg.train.deform_lr_factor
-    param_dicts = [{'params': other_params},
-                   {'params': deform_params, 'lr': deform_lr}]
+    param_dicts = []
+    if other_params:
+        param_dicts.append({'params': other_params})
+    if deform_params:
+        param_dicts.append({'params': deform_params, 'lr': deform_lr})
+    if not param_dicts:
+        raise ValueError('The model has no trainable parameters.')
 
     # Define optimizer
     if cfg.train.optimizer == 'SGD':
@@ -116,18 +128,37 @@ def train_and_validate(net, training_loader, val_loader, cfg, chkp_path=None, fi
     if (chkp_path is not None):
 
         if finetune:
-            # Only load model state if finetuning
-            checkpoint = torch.load(chkp_path)
-            net.load_state_dict(checkpoint['model_state_dict'])
+            # Old backbone checkpoints do not contain FastAdapter parameters.
+            checkpoint = torch.load(chkp_path, map_location=device)
+            incompatible = net.load_state_dict(
+                checkpoint['model_state_dict'],
+                strict=False,
+            )
+            missing_non_adapter = [
+                key for key in incompatible.missing_keys
+                if not key.startswith('fast_adapter.')
+            ]
+            if incompatible.unexpected_keys or missing_non_adapter:
+                raise RuntimeError(
+                    'Fine-tune checkpoint is incompatible. Unexpected keys: {:s}; '
+                    'missing non-adapter keys: {:s}'.format(
+                        str(list(incompatible.unexpected_keys)),
+                        str(missing_non_adapter),
+                    )
+                )
             net.train()
-            print("Model restored and ready for finetuning.")
+            print("Backbone restored; new adapter parameters remain initialized.")
 
         else:
             # load everything otherwise
-            checkpoint = torch.load(chkp_path)
+            checkpoint = torch.load(chkp_path, map_location=device)
             net.load_state_dict(checkpoint['model_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             epoch = checkpoint['epoch']
+            if 'train_batch_limit' in checkpoint:
+                training_loader.dataset.b_lim = checkpoint['train_batch_limit']
+            if 'test_batch_limit' in checkpoint:
+                val_loader.dataset.b_lim = checkpoint['test_batch_limit']
             net.train()
             print("Model and training state restored.")
 
@@ -209,6 +240,8 @@ def train_and_validate(net, training_loader, val_loader, cfg, chkp_path=None, fi
             save_dict = {'epoch': epoch,
                          'model_state_dict': net.state_dict(),
                          'optimizer_state_dict': optimizer.state_dict(),
+                         'train_batch_limit': training_loader.dataset.b_lim,
+                         'test_batch_limit': val_loader.dataset.b_lim,
                          'saving_path': cfg.exp.log_dir}
 
             # Save current state of the network (for restoring purposes)

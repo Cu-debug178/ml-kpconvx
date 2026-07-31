@@ -121,6 +121,21 @@ def my_config():
     cfg.model.upsample_n = 3            # Number of neighbors used for nearest neighbor linear interpolation (ignoeed if grid_pool)
     cfg.model.drop_path_rate = 0.3      # Rate for DropPath to make a stochastic depth model.
 
+    # FastAdapter P2A/A2P path for the existing grid hierarchy.
+    cfg.model.fa_enabled = False
+    cfg.model.fa_train_mode = 'joint'     # 'joint' or 'adapter_head'
+    cfg.model.fa_num_anchors = 100
+    cfg.model.fa_anchor_mode = 'fps'
+    cfg.model.fa_anchor_level = 0
+    cfg.model.fa_geometry_dim = 16
+    cfg.model.fa_attention_dim = 64
+    cfg.model.fa_attention_heads = 4
+    cfg.model.fa_chunk_size = 16384
+    cfg.model.fa_cross_layer = True
+    cfg.model.fa_spatial = True
+    cfg.model.fa_dropout = 0.0
+    cfg.model.fa_residual_init = 1e-3
+
     cfg.model.input_channels = 5    # This value has to be compatible with one of the dataset input features definition
     
     # cfg.model.neighbor_limits = [10, 12, 12, 12, 12]      # Use empty list to let calibration get the values
@@ -331,7 +346,9 @@ if __name__ == '__main__':
                 'model.kp_aggregation',
                 'model.kp_influence',
                 'model.norm',
-                'model.inv_act']
+                'model.inv_act',
+                'model.fa_train_mode',
+                'model.fa_anchor_mode']
 
     float_args = ['train.weight_decay',
                   'train.in_radius',
@@ -342,6 +359,8 @@ if __name__ == '__main__':
                   'model.drop_path_rate',
                   'model.kp_sigma',
                   'model.radius_scaling',
+                  'model.fa_dropout',
+                  'model.fa_residual_init',
                   'augment_train.mix3D']
 
     int_args = ['model.conv_groups',
@@ -349,7 +368,14 @@ if __name__ == '__main__':
                 'model.init_channels',
                 'model.first_inv_layer',
                 'train.cyc_decrease10',
-                'train.max_epoch']
+                'train.max_epoch',
+                'model.fa_num_anchors',
+                'model.fa_anchor_level',
+                'model.fa_geometry_dim',
+                'model.fa_attention_dim',
+                'model.fa_attention_heads',
+                'model.fa_chunk_size',
+                'exp.seed']
 
     bool_args = ['model.use_strided_conv',
                  'model.inv_grp_norm',
@@ -361,6 +387,9 @@ if __name__ == '__main__':
                  'augment_train.chromatic_norm',
                  'model.decoder_layer',
                  'model.share_kp',
+                 'model.fa_enabled',
+                 'model.fa_cross_layer',
+                 'model.fa_spatial',
                  'augment_train.height_norm']
 
     list_args = ['model.shell_sizes',
@@ -393,9 +422,20 @@ if __name__ == '__main__':
     parser.add_argument('--log_path', type=str)
     parser.add_argument('--resume_path', type=str,
                         help='Checkpoint from which to resume an interrupted training run.')
+    parser.add_argument('--finetune_path', type=str,
+                        help='Backbone checkpoint for non-strict adapter/head fine-tuning.')
     args = parser.parse_args()
 
     resume_path = None
+    finetune_path = None
+    if args.resume_path is not None and args.finetune_path is not None:
+        parser.error('--resume_path and --finetune_path are mutually exclusive.')
+
+    if args.finetune_path is not None:
+        finetune_path = os.path.abspath(args.finetune_path)
+        if not os.path.isfile(finetune_path):
+            parser.error('Checkpoint not found: {:s}'.format(finetune_path))
+
     if args.resume_path is not None:
         resume_path = os.path.abspath(args.resume_path)
         if not os.path.isfile(resume_path):
@@ -455,6 +495,9 @@ if __name__ == '__main__':
         new_arg = getattr(args, key2)
         if new_arg is not None:
             cfg[key1][key2] = bool(new_arg)
+
+    # Apply a CLI seed override before creating datasets, samplers, or models.
+    set_seed(cfg.exp.seed)
 
     if cfg.train.in_radius < 0:
         cfg.train.in_radius = int(cfg.train.in_radius)
@@ -564,5 +607,8 @@ if __name__ == '__main__':
     # Start training
     print('\n')
     frame_lines_1(['Training and Validation'])
+    checkpoint_path = resume_path if resume_path is not None else finetune_path
     train_and_validate(net, training_loader, test_loader, cfg,
-                       chkp_path=resume_path, on_gpu=True)
+                       chkp_path=checkpoint_path,
+                       finetune=finetune_path is not None,
+                       on_gpu=True)

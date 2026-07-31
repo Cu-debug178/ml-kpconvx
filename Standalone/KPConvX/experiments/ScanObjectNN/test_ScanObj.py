@@ -24,6 +24,7 @@ import sys
 import time
 import signal
 import argparse
+import random
 import torch
 import numpy as np
 from torch.utils.data import DataLoader
@@ -54,7 +55,19 @@ from tasks.test import test_model
 #
 
 
-def test_ScanObj_log(chosen_log, new_cfg, weight_path='', save_visu=False):
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def test_ScanObj_log(chosen_log,
+                     new_cfg,
+                     weight_path='',
+                     save_visu=False,
+                     test_path=''):
 
     ##############
     # Prepare Data
@@ -135,7 +148,8 @@ def test_ScanObj_log(chosen_log, new_cfg, weight_path='', save_visu=False):
     print('\n')
     frame_lines_1(['Testing pretrained model'])
 
-    test_path = os.path.join(chosen_log, 'test')
+    if not test_path:
+        test_path = os.path.join(chosen_log, 'test')
 
     # Go
     test_model(net, test_loader, new_cfg, save_visu=save_visu, test_path=test_path)
@@ -169,6 +183,8 @@ if __name__ == '__main__':
     parser.add_argument('--log_path', type=str)
     parser.add_argument('--weight_path', type=str)
     parser.add_argument('--dataset_path', type=str)
+    parser.add_argument('--test_path', type=str)
+    parser.add_argument('--max_votes', type=int)
     
     # Read arguments
     args = parser.parse_args()
@@ -191,6 +207,13 @@ if __name__ == '__main__':
     # Change dataset path if provided
     if args.dataset_path:
         new_cfg.data.path = args.dataset_path
+    if args.max_votes is not None:
+        if args.max_votes < 1:
+            parser.error('--max_votes must be positive.')
+        new_cfg.test.max_votes = args.max_votes
+
+    # Apply the experiment seed before dataset sampling and test augmentation.
+    set_seed(new_cfg.exp.seed)
 
 
     ###################
@@ -207,9 +230,11 @@ if __name__ == '__main__':
     # new_cfg.augment_test.color_drop = 0.0
 
 
-    test_ScanObj_log(log_dir, new_cfg, weight_path=weights)
+    test_ScanObj_log(log_dir,
+                     new_cfg,
+                     weight_path=weights,
+                     test_path=args.test_path or '')
     
-
 
 
 

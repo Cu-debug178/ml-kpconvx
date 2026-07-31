@@ -1,0 +1,2 @@
+sample_count,gpu_memory_avg_mib,gpu_memory_peak_mib,gpu_utilization_avg_pct,gpu_utilization_peak_pct,gpu_temperature_avg_c,gpu_temperature_peak_c,gpu_power_avg_w,gpu_power_peak_w,process_gpu_memory_avg_mib,process_gpu_memory_peak_mib
+4074,12731.41,14805.00,62.74,100.00,51.53,60.00,226.04,280.50,12720.71,14794.00

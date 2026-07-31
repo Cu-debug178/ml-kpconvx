@@ -110,7 +110,22 @@ You can download and extract them to the result folder and use our scripts to te
 
 
 
+## FastAdapter-inspired KPConvX
 
+The S3DIS and ScanObjectNN configurations include an optional sampler-agnostic
+P2A/A2P context path. It keeps the existing KPConvX hierarchy intact: anchors
+are selected once per cloud, then used for geometry-aware P2A aggregation and
+A2P feature compensation at every encoder stage.
+
+```bash
+./train_S3DIS_fastadapter.sh
+./train_ScanObjectNN_fastadapter.sh
+```
+
+Use `--fa_enabled 0` for the baseline. The anchor source can be selected with
+`--fa_anchor_mode fps|pyramid|random|stride`; `pyramid` additionally accepts
+`--fa_anchor_level`. For a checkpoint-backed Adapter/head-only run, pass
+`--fa_train_mode adapter_head --finetune_path /path/to/checkpoint.tar`.
 
 
 

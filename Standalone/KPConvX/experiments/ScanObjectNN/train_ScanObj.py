@@ -24,6 +24,8 @@ import os
 import sys
 import time
 import argparse
+import random
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
@@ -39,7 +41,7 @@ current = os.path.dirname(os.path.realpath(__file__))
 parent = os.path.dirname(os.path.dirname(current))
 sys.path.append(parent)
 
-from utils.config import init_cfg, save_cfg, get_directories
+from utils.config import init_cfg, load_cfg, save_cfg, get_directories
 from utils.printing import frame_lines_1, underline
 from utils.gpu_init import init_gpu
 
@@ -68,6 +70,7 @@ def my_config():
     """
 
     cfg = init_cfg()
+    cfg.exp.seed = 57106803  # Match the aligned Pointcept/S3DIS baseline run.
 
     # Network parameters
     # ------------------
@@ -116,6 +119,22 @@ def my_config():
     cfg.model.decoder_layer = True      # Add a layer in decoder like PointTransformer v2
     cfg.model.upsample_n = 3            # Number of neighbors used for nearest neighbor linear interpolation (ignoeed if grid_pool)
     cfg.model.drop_path_rate = 0.3      # Rate for DropPath to make a stochastic depth model.
+
+    # FastAdapter extension for object classification. The paper evaluates
+    # segmentation; this keeps the same fixed-anchor P2A/A2P mechanism.
+    cfg.model.fa_enabled = False
+    cfg.model.fa_train_mode = 'joint'     # 'joint' or 'adapter_head'
+    cfg.model.fa_num_anchors = 64
+    cfg.model.fa_anchor_mode = 'fps'
+    cfg.model.fa_anchor_level = 0
+    cfg.model.fa_geometry_dim = 16
+    cfg.model.fa_attention_dim = 64
+    cfg.model.fa_attention_heads = 4
+    cfg.model.fa_chunk_size = 4096
+    cfg.model.fa_cross_layer = True
+    cfg.model.fa_spatial = True
+    cfg.model.fa_dropout = 0.0
+    cfg.model.fa_residual_init = 1e-3
 
     cfg.model.input_channels = 4        # This value has to be compatible with one of the dataset input features definition
     
@@ -244,6 +263,17 @@ def my_config():
     return cfg
 
 
+def set_seed(seed):
+    """Seed the RNGs used by model initialization and data loading."""
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+
 def adjust_config(cfg):
 
     # Model
@@ -278,6 +308,9 @@ def adjust_config(cfg):
 #
 if __name__ == '__main__':
 
+    cfg = my_config()
+    set_seed(cfg.exp.seed)
+
     # First create a tensor on GPU to signal that we use it
     device = init_gpu()
     a = torch.zeros((1,), device=device)
@@ -292,7 +325,9 @@ if __name__ == '__main__':
                 'model.kp_aggregation',
                 'model.kp_influence',
                 'model.norm',
-                'model.inv_act']
+                'model.inv_act',
+                'model.fa_train_mode',
+                'model.fa_anchor_mode']
 
     float_args = ['train.weight_decay',
                   'train.in_radius',
@@ -304,7 +339,9 @@ if __name__ == '__main__':
                   'model.channel_scaling',
                   'model.drop_path_rate',
                   'model.kp_sigma',
-                  'model.radius_scaling']
+                  'model.radius_scaling',
+                  'model.fa_dropout',
+                  'model.fa_residual_init']
 
     int_args = ['model.conv_groups',
                 'model.inv_groups',
@@ -313,7 +350,14 @@ if __name__ == '__main__':
                 'train.cyc_decrease10',
                 'augment_train.rsmix_nsample',
                 'model.input_channels',
-                'train.max_epoch']
+                'train.max_epoch',
+                'model.fa_num_anchors',
+                'model.fa_anchor_level',
+                'model.fa_geometry_dim',
+                'model.fa_attention_dim',
+                'model.fa_attention_heads',
+                'model.fa_chunk_size',
+                'exp.seed']
 
     bool_args = ['model.use_strided_conv',
                  'model.inv_grp_norm',
@@ -325,6 +369,9 @@ if __name__ == '__main__':
                  'augment_train.chromatic_norm',
                  'model.decoder_layer',
                  'model.share_kp',
+                 'model.fa_enabled',
+                 'model.fa_cross_layer',
+                 'model.fa_spatial',
                  'augment_train.height_norm']
 
     list_args = ['model.shell_sizes',
@@ -355,37 +402,85 @@ if __name__ == '__main__':
     # Log path special arg
     parser.add_argument('--dataset_path', type=str)
     parser.add_argument('--log_path', type=str)
+    parser.add_argument('--resume_path', type=str,
+                        help='Checkpoint from which to resume an interrupted training run.')
+    parser.add_argument('--finetune_path', type=str,
+                        help='Backbone checkpoint for non-strict adapter/head fine-tuning.')
     args = parser.parse_args()
 
-    # Configuration parameters
-    cfg = my_config()
+    resume_path = None
+    finetune_path = None
+    if args.resume_path is not None and args.finetune_path is not None:
+        parser.error('--resume_path and --finetune_path are mutually exclusive.')
+
+    if args.finetune_path is not None:
+        finetune_path = os.path.abspath(args.finetune_path)
+        if not os.path.isfile(finetune_path):
+            parser.error('Checkpoint not found: {:s}'.format(finetune_path))
+
+    if args.resume_path is not None:
+        resume_path = os.path.abspath(args.resume_path)
+        if not os.path.isfile(resume_path):
+            parser.error('Checkpoint not found: {:s}'.format(resume_path))
+
+        checkpoint_dir = os.path.dirname(resume_path)
+        resume_log_path = os.path.dirname(checkpoint_dir)
+        if os.path.basename(checkpoint_dir) != 'checkpoints':
+            parser.error('Expected checkpoint to be in a checkpoints directory: {:s}'.format(resume_path))
+        if args.log_path is not None and os.path.abspath(args.log_path) != resume_log_path:
+            parser.error('--log_path must match the checkpoint experiment directory when resuming.')
+
+        cfg = load_cfg(resume_log_path)
+        if os.path.abspath(cfg.exp.log_dir) != resume_log_path:
+            parser.error('Checkpoint and saved configuration refer to different experiment directories.')
+        if args.dataset_path is not None and os.path.realpath(args.dataset_path) != os.path.realpath(cfg.data.path):
+            parser.error('--dataset_path differs from the dataset recorded by the checkpoint.')
+
+        changed_args = []
+        for all_args in [str_args, float_args, int_args, list_args, bool_args]:
+            for arg_name in all_args:
+                key2 = arg_name.split('.')[1]
+                if getattr(args, key2) is not None:
+                    changed_args.append('--' + key2)
+        if changed_args:
+            parser.error('Training-configuration overrides are not allowed when resuming: {:s}'.format(
+                ', '.join(changed_args)))
 
     # Load data parameters
-    if args.dataset_path is not None:
+    if resume_path is not None:
+        pass
+    elif args.dataset_path is not None:
         cfg.data.update(ScanObjectNN_cfg(cfg, dataset_path=args.dataset_path).data)
     else:
         cfg.data.update(ScanObjectNN_cfg(cfg).data)
 
     # Load experiment parameters
-    if args.log_path is not None:
+    if resume_path is not None:
+        pass
+    elif args.log_path is not None:
         get_directories(cfg, log_path=args.log_path)
     else:
         get_directories(cfg)
 
     # Update parameters
-    for all_args in [str_args, float_args, int_args, list_args, bool_args]:
-        for arg_name in all_args:
+    if resume_path is None:
+        for all_args in [str_args, float_args, int_args, list_args, bool_args]:
+            for arg_name in all_args:
+                key1, key2 = arg_name.split('.')
+                new_arg = getattr(args, key2)
+                if new_arg is not None:
+                    cfg[key1][key2] = new_arg
+
+    # Sepcial boolean handling
+    if resume_path is None:
+        for arg_name in bool_args:
             key1, key2 = arg_name.split('.')
             new_arg = getattr(args, key2)
             if new_arg is not None:
-                cfg[key1][key2] = new_arg
+                cfg[key1][key2] = bool(new_arg)
 
-    # Sepcial boolean handling
-    for arg_name in bool_args:
-        key1, key2 = arg_name.split('.')
-        new_arg = getattr(args, key2)
-        if new_arg is not None:
-            cfg[key1][key2] = bool(new_arg)
+    # Apply a CLI seed override before creating datasets, samplers, or models.
+    set_seed(cfg.exp.seed)
 
     if cfg.train.in_radius < 0:
         cfg.train.in_radius = int(cfg.train.in_radius)
@@ -414,13 +509,15 @@ if __name__ == '__main__':
                                        precompute_pyramid=True)
 
     # Calib from training data
-    training_dataset.calib_batch(cfg, update_test=True)
-    training_dataset.calib_neighbors(cfg)
+    if resume_path is None:
+        training_dataset.calib_batch(cfg, update_test=True)
+        training_dataset.calib_neighbors(cfg)
     test_dataset.b_n = cfg.test.batch_size
     test_dataset.b_lim = cfg.test.batch_limit
 
     # Save configuration now that it is complete
-    save_cfg(cfg)
+    if resume_path is None:
+        save_cfg(cfg)
     
     # Initialize samplers
     training_sampler = ObjClassifSampler(training_dataset)
@@ -489,5 +586,8 @@ if __name__ == '__main__':
     # Start training
     print('\n')
     frame_lines_1(['Training and Validation'])
-    train_and_validate(net, training_loader, test_loader, cfg, on_gpu=True)
-
+    checkpoint_path = resume_path if resume_path is not None else finetune_path
+    train_and_validate(net, training_loader, test_loader, cfg,
+                       chkp_path=checkpoint_path,
+                       finetune=finetune_path is not None,
+                       on_gpu=True)

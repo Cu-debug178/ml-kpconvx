@@ -41,6 +41,13 @@ The setup instructions are different if you plan to use the Standalone or the Po
 - [Setup the Pointcept version](./Pointcept-wrapper/).
 
 
+## Experiment reports
+
+Lightweight, versioned training and evaluation summaries are indexed in
+[experiment_reports](./experiment_reports/). Checkpoints, datasets, raw logs,
+and other large runtime artifacts are intentionally kept outside Git.
+
+
 ## Citation
 If you found this code useful, please cite the following paper:
 ```
@@ -55,4 +62,3 @@ If you found this code useful, please cite the following paper:
 
 ## Acknowledgements
 Our codebase is built using multiple opensource contributions, please see [ACKNOWLEDGEMENTS](ACKNOWLEDGEMENTS) for more details. 
-

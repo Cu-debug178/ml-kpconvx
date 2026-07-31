@@ -129,6 +129,21 @@ def init_cfg():
     cfg.model.layer_blocks = (2, 1, 1)  # Tuple, number of blocks in each layers (in addition to the strided ones in between).
     cfg.model.neighbor_limits = []      #  List, maximum number of neigbors per layers
 
+    # FastAdapter geometric context path
+    cfg.model.fa_enabled = False         #  Bool, enable P2A/A2P after encoder stages
+    cfg.model.fa_train_mode = 'joint'    #   Str, 'joint' or 'adapter_head'
+    cfg.model.fa_num_anchors = 100       #   Int, maximum anchors per cloud/object
+    cfg.model.fa_anchor_mode = 'fps'     #   Str, 'fps', 'pyramid', 'stride', or 'random'
+    cfg.model.fa_anchor_level = 0        #   Int, source level for pyramid anchors
+    cfg.model.fa_geometry_dim = 16       #   Int, geometry embedding width
+    cfg.model.fa_attention_dim = 64      #   Int, anchor-attention width
+    cfg.model.fa_attention_heads = 4     #   Int, anchor-attention heads
+    cfg.model.fa_chunk_size = 16384      #   Int, nearest-anchor assignment chunk
+    cfg.model.fa_cross_layer = True      #  Bool, fuse anchors across stages
+    cfg.model.fa_spatial = True          #  Bool, self-attention between anchors
+    cfg.model.fa_dropout = 0.0           # Float, attention dropout
+    cfg.model.fa_residual_init = 1e-3    # Float, initial A2P residual scale
+
     cfg.model.process_ratio = 1.0       # Float, ratio between the radius of processed volume and the radius of the input volume
     cfg.model.n_frames = 1              #   Int, number of frames used (Specific to SLAM)
 
@@ -305,4 +320,3 @@ def load_cfg(log_path):
             cfg[k].update(cfg2[k])
 
     return cfg
-

@@ -10,3 +10,32 @@
 .DS_Store
 **/.DS_Store
 **/*.out
+
+# Local datasets and generated experiment artifacts
+/Standalone/data/
+/Standalone/KPConvX/results/
+/kernels/
+
+# Model weights and checkpoints are never stored in Git
+**/checkpoints/
+**/snapshots/
+*chkp*.tar
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+
+# Logs, process state, and local experiment integrations
+*.log
+*.pid
+*.lock
+**/.ipynb_checkpoints/
+wandb/
+runs/
+events.out.tfevents.*
+.finalize_shutdown/
+.scanobjectnn_full_pipeline*/
+
+# Generated kernel-point caches; existing tracked reference files are retained
+/Standalone/KPConvX/kernels/dispositions/k_*.ply

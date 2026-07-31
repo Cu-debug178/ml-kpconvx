@@ -1,0 +1,5 @@
+checkpoint_role,representation,mean_iou_pct,ceiling_iou_pct,floor_iou_pct,wall_iou_pct,beam_iou_pct,column_iou_pct,window_iou_pct,door_iou_pct,chair_iou_pct,table_iou_pct,bookcase_iou_pct,sofa_iou_pct,board_iou_pct,clutter_iou_pct
+best_validation,subcloud,70.9,94.1,98.2,84.1,0.0,25.3,58.0,84.6,81.9,92.7,78.8,77.2,82.0,64.0
+best_validation,fullcloud,71.1,94.5,98.2,85.0,0.0,25.9,61.2,84.0,82.6,92.3,78.8,76.8,81.9,62.8
+final,subcloud,71.1,93.8,98.3,84.3,0.0,27.1,58.1,83.5,81.6,92.8,81.9,77.8,81.9,63.8
+final,fullcloud,71.4,94.3,98.2,85.1,0.0,27.8,61.3,82.8,82.2,92.5,82.3,77.4,82.1,62.6

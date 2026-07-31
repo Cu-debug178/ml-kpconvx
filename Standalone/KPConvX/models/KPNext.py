@@ -18,6 +18,7 @@ import numpy as np
 from models.generic_blocks import LinearUpsampleBlock, NearestUpsampleBlock, UnaryBlock, local_nearest_pool, GlobalAverageBlock, MaxPoolBlock, SmoothCrossEntropyLoss
 from models.kpconv_blocks import KPConvBlock, KPConvResidualBlock, KPConvInvertedBlock
 from models.kpnext_blocks import KPNextResidualBlock, KPNextInvertedBlock, KPNextMultiShortcutBlock, KPNextBlock
+from models.fast_adapter import FastAdapterStack
 
 from utils.torch_pyramid import fill_pyramid
 
@@ -63,6 +64,10 @@ class KPNeXt(nn.Module):
         self.grid_pool = cfg.model.grid_pool
         self.add_decoder_layer = cfg.model.decoder_layer
 
+        # This context path is independent of the pyramid sampling method.
+        self.fa_enabled = bool(getattr(cfg.model, 'fa_enabled', False))
+        self.fa_train_mode = str(getattr(cfg.model, 'fa_train_mode', 'joint')).lower()
+
         # Stochastic depth decay rule
         dpr_list = np.linspace(0, cfg.model.drop_path_rate, sum(self.layer_blocks)) 
         
@@ -84,6 +89,17 @@ class KPNeXt(nn.Module):
         for l in range(self.num_layers):
             target_C = first_C * channel_scaling ** l                   # Scale channels
             layer_C.append(int(np.ceil((target_C - 0.1) / 16)) * 16)    # Ensure it is divisible by 16 (even the first one)
+
+        # Grid pooling expands the final block before pooling, so use the
+        # actual feature width at each adapter insertion point.
+        adapter_channels = [
+            layer_C[l + 1] if self.grid_pool and l < self.num_layers - 1 else layer_C[l]
+            for l in range(self.num_layers)
+        ]
+        if self.fa_enabled:
+            self.fast_adapter = FastAdapterStack(adapter_channels, cfg.model)
+        else:
+            self.fast_adapter = None
 
         # Verify the architecture validity
         if self.layer_blocks[0] < 1:
@@ -246,7 +262,37 @@ class KPNeXt(nn.Module):
         self.deform_loss = 0
         self.l1 = nn.L1Loss()
 
+        self._configure_fast_adapter_training()
         return
+
+    def _configure_fast_adapter_training(self):
+        """Configure joint training or adapter/head-only fine-tuning."""
+
+        if not self.fa_enabled or self.fa_train_mode == 'joint':
+            return
+        if self.fa_train_mode != 'adapter_head':
+            raise ValueError(
+                "model.fa_train_mode must be either 'joint' or 'adapter_head'"
+            )
+
+        for parameter in self.parameters():
+            parameter.requires_grad = False
+        for parameter in self.fast_adapter.parameters():
+            parameter.requires_grad = True
+        for parameter in self.head.parameters():
+            parameter.requires_grad = True
+
+    def train(self, mode=True):
+        """Keep the frozen backbone, including BN statistics, in eval mode."""
+
+        super().train(mode)
+        if mode and self.fa_enabled and self.fa_train_mode == 'adapter_head':
+            for child_name, child_module in self.named_children():
+                if child_name not in {'fast_adapter', 'head'}:
+                    child_module.eval()
+            self.fast_adapter.train(True)
+            self.head.train(True)
+        return self
 
     def get_unary_block(self, in_C, out_C, cfg, norm_type=None):
 
@@ -388,9 +434,17 @@ class KPNeXt(nn.Module):
                          sub_mode=self.in_sub_mode,
                          grid_pool_mode=self.grid_pool)
 
-        if verbose: 
+        if verbose:
             torch.cuda.synchronize(batch.device())                           
             t += [time.time()]
+
+        # Fixed anchors are selected once and reused at every encoder stage.
+        fa_state = None
+        if self.fast_adapter is not None:
+            fa_state = self.fast_adapter.initialize_state(
+                batch.in_dict.points,
+                batch.in_dict.lengths,
+            )
 
         # Get input features
         feats = batch.in_dict.features.clone().detach()
@@ -422,6 +476,16 @@ class KPNeXt(nn.Module):
                 upcut = None
                 for block in block_list:
                     feats, upcut = block(batch.in_dict.points[l], batch.in_dict.points[l], feats, batch.in_dict.neighbors[l], batch.in_dict.lengths[l], upcut=upcut)
+
+            # Compensate geometry before skip storage and downsampling.
+            if self.fast_adapter is not None:
+                feats, fa_state = self.fast_adapter.forward_layer(
+                    l,
+                    batch.in_dict.points[l],
+                    batch.in_dict.lengths[l],
+                    feats,
+                    fa_state,
+                )
                 
             if layer < self.num_layers:
 
@@ -555,7 +619,6 @@ class KPNeXt(nn.Module):
         correct = (predicted == target).sum().item()
 
         return correct / total
-
 
 
 
