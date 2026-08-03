@@ -140,3 +140,38 @@ Use `--fa_enabled 0` for the baseline. The anchor source can be selected with
 
 
 
+
+## LitePT-inspired stage-specialized KPConvX
+
+The standalone KPNeXt encoder can optionally use KPConvD in high-resolution
+stages and serialized PointROPE token attention in low-resolution stages.  This
+is distinct from KPConvX kernel attention and does not add spconv or
+FlashAttention as hard dependencies.
+
+```bash
+# S3DIS: C-C-C-A-A, LitePT-S block depths and lightweight decoder
+./train_S3DIS_litept.sh
+
+# ScanObjectNN classification
+./train_ScanObjectNN_litept.sh
+
+# Compose with the existing FastAdapter path
+FA_ENABLED=1 ./train_S3DIS_litept.sh
+```
+
+Both launchers accept `RESUME_PATH=/path/to/checkpoint.tar`; resumed runs use
+the configuration saved with the checkpoint.  The ScanObjectNN launcher keeps
+that experiment's current `kpconvd` default.  Pass `--kp_mode kpconvx` only for
+the explicit KPConvX secondary baseline.
+
+Useful ablations include `--litept_rope_enabled 0`,
+`HANDOVER_STAGE=3|4`, `--litept_patch_size 32|64|128|256`, and
+`--litept_orders z` versus `--litept_orders z,z-trans`.  The default launcher
+uses block depths `2 2 2 6 2`; append `--layer_blocks 3 3 9 12 3` for a
+depth-matched light-decoder run.  For an operator-only comparison against the
+KPConvX-L heavy-decoder baseline, also pass
+`--litept_light_decoder 0 --decoder_layer 1`.  The launcher derives the convolution-only stage count
+when `HANDOVER_STAGE` is set, ensuring a monotonic C-to-X-to-A hierarchy.  See
+`../LITEPT_KPCONVX_IMPLEMENTATION_ZH.md` and
+`../litept_experiment_matrix.csv` for the implementation rationale and full
+experiment plan.

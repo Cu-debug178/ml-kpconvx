@@ -19,6 +19,8 @@ from models.generic_blocks import LinearUpsampleBlock, NearestUpsampleBlock, Una
 from models.kpconv_blocks import KPConvBlock, KPConvResidualBlock, KPConvInvertedBlock
 from models.kpnext_blocks import KPNextResidualBlock, KPNextInvertedBlock, KPNextMultiShortcutBlock, KPNextBlock
 from models.fast_adapter import FastAdapterStack
+from models.litept_blocks import (LiteHandoverBlock, LitePointTransformerBlock,
+                                  SerializedPatchCache, parse_serialization_orders)
 
 from utils.torch_pyramid import fill_pyramid
 
@@ -63,6 +65,48 @@ class KPNeXt(nn.Module):
         self.task = cfg.data.task
         self.grid_pool = cfg.model.grid_pool
         self.add_decoder_layer = cfg.model.decoder_layer
+
+        # LitePT-inspired stage specialization.  This is intentionally separate
+        # from KPConvX kernel attention: late stages use token self-attention.
+        self.litept_enabled = bool(getattr(cfg.model, 'litept_enabled', False))
+        self.litept_conv_stages = int(getattr(cfg.model, 'litept_conv_stages', 3))
+        self.litept_handover_stage = int(getattr(cfg.model, 'litept_handover_stage', 0))
+        self.litept_patch_size = int(getattr(cfg.model, 'litept_patch_size', 128))
+        self.litept_num_heads = int(getattr(cfg.model, 'litept_num_heads', 8))
+        self.litept_attention_ratio = float(getattr(cfg.model, 'litept_attention_ratio', 1.0))
+        self.litept_mlp_ratio = float(getattr(cfg.model, 'litept_mlp_ratio', 4.0))
+        self.litept_rope_base = float(getattr(cfg.model, 'litept_rope_base', 100.0))
+        self.litept_rope_enabled = bool(getattr(cfg.model, 'litept_rope_enabled', True))
+        self.litept_attention_dropout = float(getattr(cfg.model, 'litept_attention_dropout', 0.0))
+        self.litept_projection_dropout = float(getattr(cfg.model, 'litept_projection_dropout', 0.0))
+        self.litept_orders = parse_serialization_orders(
+            getattr(cfg.model, 'litept_orders', 'z,z-trans')
+        )
+        self.litept_light_decoder = bool(
+            getattr(cfg.model, 'litept_light_decoder', False)
+        )
+        if self.litept_enabled:
+            if self.kp_mode not in {'kpconvd', 'kpconvx'}:
+                raise ValueError(
+                    "LitePT stage specialization currently requires kp_mode "
+                    "'kpconvd' or 'kpconvx'."
+                )
+            if not 0 <= self.litept_conv_stages <= self.num_layers:
+                raise ValueError('litept_conv_stages must be between 0 and num_layers')
+            if not 0 <= self.litept_handover_stage <= self.num_layers:
+                raise ValueError('litept_handover_stage must be 0 or a valid 1-based stage')
+            if (
+                self.litept_handover_stage > 0
+                and self.litept_handover_stage != self.litept_conv_stages + 1
+            ):
+                raise ValueError(
+                    'litept_handover_stage must immediately follow the '
+                    'convolution-only stages (handover_stage = conv_stages + 1)'
+                )
+            if self.litept_patch_size < 1:
+                raise ValueError('litept_patch_size must be positive')
+            if self.litept_light_decoder and self.task == 'cloud_segmentation':
+                self.add_decoder_layer = False
 
         # This context path is independent of the pyramid sampling method.
         self.fa_enabled = bool(getattr(cfg.model, 'fa_enabled', False))
@@ -112,6 +156,7 @@ class KPNeXt(nn.Module):
         #####################
 
         # ------ Layers 1 ------
+        self._litept_patch_caches = {}
         if cfg.model.share_kp:
             self.shared_kp = [{} for _ in range(self.num_layers)]
         else:
@@ -125,16 +170,18 @@ class KPNeXt(nn.Module):
         # Next blocks
         self.encoder_1 = nn.ModuleList()
         use_conv = cfg.model.first_inv_layer >= 1
+        stage_kind = self._encoder_stage_kind(1, use_conv)
         for block_i in range(self.layer_blocks[0]):
             Cout = layer_C[1] if self.grid_pool and block_i == self.layer_blocks[0] - 1 else C
-            self.encoder_1.append(self.get_residual_block(C, Cout, conv_r, conv_sig, cfg,
-                                                          shared_kp_data=self.shared_kp[0],
-                                                          conv_layer=use_conv,
-                                                          drop_path=dpr_list[block_i]))
+            self.encoder_1.append(self.get_encoder_block(
+                C, Cout, conv_r, conv_sig, cfg, layer=1, block_i=block_i,
+                shared_kp_data=self.shared_kp[0], stage_kind=stage_kind,
+                drop_path=dpr_list[block_i]))
 
         # Pooling block
-        self.pooling_1 = self.get_pooling_block(C, layer_C[1], conv_r, conv_sig, cfg,
-                                                use_mod=(not use_conv))
+        self.pooling_1 = self.get_pooling_block(
+            C, layer_C[1], conv_r, conv_sig, cfg,
+            use_mod=(not use_conv) if not self.litept_enabled else False)
 
         # ------ Layers [2, 3, 4, 5] ------
         for layer in range(2, self.num_layers + 1):
@@ -147,20 +194,22 @@ class KPNeXt(nn.Module):
 
             # Layer blocks
             use_conv = cfg.model.first_inv_layer >= layer
+            stage_kind = self._encoder_stage_kind(layer, use_conv)
             encoder_i = nn.ModuleList()
             for block_i in range(self.layer_blocks[l]):
                 Cout = layer_C[l+1] if self.grid_pool and layer < self.num_layers and block_i == self.layer_blocks[l] - 1 else C
-                encoder_i.append(self.get_residual_block(C, Cout, conv_r, conv_sig, cfg,
-                                                         shared_kp_data=self.shared_kp[l],
-                                                         conv_layer=use_conv,
-                                                         drop_path=dpr_list[sum(self.layer_blocks[:l]) + block_i]))
+                global_block_i = sum(self.layer_blocks[:l]) + block_i
+                encoder_i.append(self.get_encoder_block(
+                    C, Cout, conv_r, conv_sig, cfg, layer=layer, block_i=global_block_i,
+                    shared_kp_data=self.shared_kp[l], stage_kind=stage_kind,
+                    drop_path=dpr_list[global_block_i]))
             setattr(self, 'encoder_{:d}'.format(layer), encoder_i)
 
             # Pooling block (not for the last layer)
             if layer < self.num_layers:
-                pooling_i = self.get_pooling_block(C, layer_C[l+1], conv_r, conv_sig, cfg,
-                                                   use_mod=(not use_conv))
-
+                pooling_i = self.get_pooling_block(
+                    C, layer_C[l+1], conv_r, conv_sig, cfg,
+                    use_mod=(not use_conv) if not self.litept_enabled else False)
                 setattr(self, 'pooling_{:d}'.format(layer), pooling_i)
 
         #####################
@@ -202,7 +251,14 @@ class KPNeXt(nn.Module):
                     Cin = C1 + C1
                 else:
                     Cin = C + C1
-                decoder_unary_i = self.get_unary_block(Cin, C, cfg)
+                decoder_norm = (
+                    'layer'
+                    if self.litept_enabled and self.litept_light_decoder
+                    else None
+                )
+                decoder_unary_i = self.get_unary_block(
+                    Cin, C, cfg, norm_type=decoder_norm
+                )
                 setattr(self, 'decoder_unary_{:d}'.format(layer), decoder_unary_i)
 
                 # Additionnal network layer (optional)
@@ -293,6 +349,86 @@ class KPNeXt(nn.Module):
             self.fast_adapter.train(True)
             self.head.train(True)
         return self
+
+    def _encoder_stage_kind(self, layer, original_use_conv):
+        """Return ``conv``, ``attention``, ``handover`` or ``kpconvx``."""
+
+        if not self.litept_enabled:
+            return 'conv' if original_use_conv else 'kpconvx'
+        if layer == self.litept_handover_stage:
+            return 'handover'
+        if layer <= self.litept_conv_stages:
+            return 'conv'
+        return 'attention'
+
+    def get_encoder_block(self, in_C, out_C, radius, sigma, cfg, layer, block_i,
+                          shared_kp_data, stage_kind, drop_path):
+        """Build a stage-tailored encoder block.
+
+        Early ``conv`` stages use KPConvD (kernel attention disabled).  Late
+        ``attention`` stages use serialized PointROPE token attention.  A
+        ``handover`` stage applies both operators sequentially.
+        """
+
+        if stage_kind in {'conv', 'kpconvx'}:
+            return self.get_residual_block(
+                in_C, out_C, radius, sigma, cfg,
+                shared_kp_data=shared_kp_data,
+                conv_layer=(stage_kind == 'conv'),
+                drop_path=drop_path)
+
+        voxel_size = max(
+            float(self.subsample_size) * self.radius_scaling ** (layer - 1),
+            1e-6,
+        )
+        order = self.litept_orders[block_i % len(self.litept_orders)]
+        patch_cache = self._litept_patch_caches.setdefault(
+            layer, SerializedPatchCache()
+        )
+
+        if stage_kind == 'attention':
+            return LitePointTransformerBlock(
+                in_channels=in_C,
+                out_channels=out_C,
+                voxel_size=voxel_size,
+                num_heads=self.litept_num_heads,
+                patch_size=self.litept_patch_size,
+                attention_ratio=self.litept_attention_ratio,
+                mlp_ratio=self.litept_mlp_ratio,
+                rope_base=self.litept_rope_base,
+                rope_enabled=self.litept_rope_enabled,
+                attention_dropout=self.litept_attention_dropout,
+                projection_dropout=self.litept_projection_dropout,
+                drop_path=drop_path,
+                order=order,
+                patch_cache=patch_cache,
+            )
+
+        if stage_kind == 'handover':
+            convolution = self.get_residual_block(
+                in_C, out_C, radius, sigma, cfg,
+                shared_kp_data=shared_kp_data,
+                conv_layer=True,
+                drop_path=drop_path)
+            attention = LitePointTransformerBlock(
+                in_channels=out_C,
+                out_channels=out_C,
+                voxel_size=voxel_size,
+                num_heads=self.litept_num_heads,
+                patch_size=self.litept_patch_size,
+                attention_ratio=self.litept_attention_ratio,
+                mlp_ratio=self.litept_mlp_ratio,
+                rope_base=self.litept_rope_base,
+                rope_enabled=self.litept_rope_enabled,
+                attention_dropout=self.litept_attention_dropout,
+                projection_dropout=self.litept_projection_dropout,
+                drop_path=drop_path,
+                order=order,
+                patch_cache=patch_cache,
+            )
+            return LiteHandoverBlock(convolution, attention)
+
+        raise ValueError('Unknown encoder stage kind: {:s}'.format(stage_kind))
 
     def get_unary_block(self, in_C, out_C, cfg, norm_type=None):
 
@@ -415,6 +551,11 @@ class KPNeXt(nn.Module):
 
 
     def forward(self, batch, verbose=False):
+
+        # Serialization is shared by all attention blocks in a stage, but must
+        # be rebuilt for each new batch because point coordinates change.
+        for patch_cache in self._litept_patch_caches.values():
+            patch_cache.clear()
 
         #  ------ Init ------
         

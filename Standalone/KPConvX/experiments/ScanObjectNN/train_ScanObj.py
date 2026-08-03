@@ -136,6 +136,22 @@ def my_config():
     cfg.model.fa_dropout = 0.0
     cfg.model.fa_residual_init = 1e-3
 
+    # LitePT-inspired hierarchy: KPConvD at high resolution, PointROPE token
+    # attention at low resolution. Disabled by default for baseline parity.
+    cfg.model.litept_enabled = False
+    cfg.model.litept_conv_stages = 3
+    cfg.model.litept_handover_stage = 0  # Must be litept_conv_stages + 1 when enabled.
+    cfg.model.litept_patch_size = 64
+    cfg.model.litept_num_heads = 8
+    cfg.model.litept_attention_ratio = 1.0
+    cfg.model.litept_mlp_ratio = 4.0
+    cfg.model.litept_rope_base = 100.0
+    cfg.model.litept_rope_enabled = True
+    cfg.model.litept_attention_dropout = 0.0
+    cfg.model.litept_projection_dropout = 0.0
+    cfg.model.litept_orders = 'z,z-trans'
+    cfg.model.litept_light_decoder = False
+
     cfg.model.input_channels = 4        # This value has to be compatible with one of the dataset input features definition
     
     # cfg.model.neighbor_limits = [8, 8, 8, 9, 9, 10, 10, 10, 10]
@@ -327,7 +343,8 @@ if __name__ == '__main__':
                 'model.norm',
                 'model.inv_act',
                 'model.fa_train_mode',
-                'model.fa_anchor_mode']
+                'model.fa_anchor_mode',
+                'model.litept_orders']
 
     float_args = ['train.weight_decay',
                   'train.in_radius',
@@ -341,7 +358,12 @@ if __name__ == '__main__':
                   'model.kp_sigma',
                   'model.radius_scaling',
                   'model.fa_dropout',
-                  'model.fa_residual_init']
+                  'model.fa_residual_init',
+                  'model.litept_attention_ratio',
+                  'model.litept_mlp_ratio',
+                  'model.litept_rope_base',
+                  'model.litept_attention_dropout',
+                  'model.litept_projection_dropout']
 
     int_args = ['model.conv_groups',
                 'model.inv_groups',
@@ -357,6 +379,10 @@ if __name__ == '__main__':
                 'model.fa_attention_dim',
                 'model.fa_attention_heads',
                 'model.fa_chunk_size',
+                'model.litept_conv_stages',
+                'model.litept_handover_stage',
+                'model.litept_patch_size',
+                'model.litept_num_heads',
                 'exp.seed']
 
     bool_args = ['model.use_strided_conv',
@@ -372,6 +398,9 @@ if __name__ == '__main__':
                  'model.fa_enabled',
                  'model.fa_cross_layer',
                  'model.fa_spatial',
+                 'model.litept_enabled',
+                 'model.litept_rope_enabled',
+                 'model.litept_light_decoder',
                  'augment_train.height_norm']
 
     list_args = ['model.shell_sizes',

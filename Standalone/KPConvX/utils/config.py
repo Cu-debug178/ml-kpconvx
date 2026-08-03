@@ -144,6 +144,21 @@ def init_cfg():
     cfg.model.fa_dropout = 0.0           # Float, attention dropout
     cfg.model.fa_residual_init = 1e-3    # Float, initial A2P residual scale
 
+    # LitePT-inspired stage-specialized encoder
+    cfg.model.litept_enabled = False              #  Bool, use KPConvD early and PointROPE attention late
+    cfg.model.litept_conv_stages = 3              #   Int, number of leading convolution-only stages
+    cfg.model.litept_handover_stage = 0           #   Int, optional conv_stages + 1 stage using convolution + attention
+    cfg.model.litept_patch_size = 128             #   Int, serialized local-attention patch size
+    cfg.model.litept_num_heads = 8                #   Int, attention heads in late stages
+    cfg.model.litept_attention_ratio = 1.0        # Float, QKV width relative to stage width
+    cfg.model.litept_mlp_ratio = 4.0              # Float, transformer MLP expansion
+    cfg.model.litept_rope_base = 100.0
+    cfg.model.litept_rope_enabled = True          #  Bool, apply PointROPE to query and key
+    cfg.model.litept_attention_dropout = 0.0      # Float, attention probability dropout
+    cfg.model.litept_projection_dropout = 0.0     # Float, projection/MLP dropout
+    cfg.model.litept_orders = 'z,z-trans'         #   Str, comma-separated serialization orders
+    cfg.model.litept_light_decoder = False        #  Bool, use only projection blocks in segmentation decoder
+
     cfg.model.process_ratio = 1.0       # Float, ratio between the radius of processed volume and the radius of the input volume
     cfg.model.n_frames = 1              #   Int, number of frames used (Specific to SLAM)
 

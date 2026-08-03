@@ -1,0 +1,20 @@
+dataset,experiment_id,architecture,depths,fast_adapter,key_overrides,seeds,primary_metrics,purpose
+S3DIS,B0,KPConvX original,"3-3-9-12-3",off,"litept_enabled=0;first_inv_layer=1;decoder_layer=1","1|42|1000","mIoU|mAcc|OA|throughput|latency|peak_memory|params",reference baseline
+S3DIS,B1,late KPConvX kernel attention,"3-3-9-12-3",off,"litept_enabled=0;first_inv_layer=3;decoder_layer=1","1|42|1000","mIoU|mAcc|OA|throughput|latency|peak_memory|params",separate delayed kernel attention from token attention with the B0 decoder unchanged
+S3DIS,L0,C-C-C-A-A depth matched,"3-3-9-12-3",off,"litept_enabled=1;litept_conv_stages=3;litept_handover_stage=0;litept_patch_size=128;litept_light_decoder=0;decoder_layer=1","1|42|1000","mIoU|mAcc|OA|throughput|latency|peak_memory|params",operator allocation ablation with depth and decoder matched to B0
+S3DIS,L0D,C-C-C-A-A depth matched light decoder,"3-3-9-12-3",off,"litept_enabled=1;litept_conv_stages=3;litept_handover_stage=0;litept_patch_size=128;litept_light_decoder=1;decoder_layer=0","1|42|1000","mIoU|mAcc|OA|throughput|latency|peak_memory|params",isolate the lightweight decoder after the operator comparison
+S3DIS,L1,C-C-C-A-A small,"2-2-2-6-2",off,"litept_enabled=1;litept_conv_stages=3;litept_patch_size=128;litept_light_decoder=1;decoder_layer=0","1|42|1000","mIoU|mAcc|OA|throughput|latency|peak_memory|params",main Pareto candidate
+S3DIS,L2,C-C-C-A-A no PointROPE,"2-2-2-6-2",off,"L1;litept_rope_enabled=0","1|42|1000","mIoU|mAcc|OA",PointROPE contribution
+S3DIS,L3,C-C-X-A-A,"2-2-2-6-2",off,"litept_conv_stages=2;litept_handover_stage=3","1|42|1000","mIoU|mAcc|OA|latency|params",handover at stage 3
+S3DIS,L4,C-C-C-X-A,"2-2-2-6-2",off,"litept_conv_stages=3;litept_handover_stage=4","1|42|1000","mIoU|mAcc|OA|latency|params",handover at stage 4
+S3DIS,L5a,L1 patch 32,"2-2-2-6-2",off,"litept_patch_size=32","1|42|1000","mIoU|latency|peak_memory",patch tradeoff
+S3DIS,L5b,L1 patch 64,"2-2-2-6-2",off,"litept_patch_size=64","1|42|1000","mIoU|latency|peak_memory",patch tradeoff
+S3DIS,L5c,L1 patch 256,"2-2-2-6-2",off,"litept_patch_size=256","1|42|1000","mIoU|latency|peak_memory",patch tradeoff
+S3DIS,F0,KPConvX + FastAdapter,"3-3-9-12-3",on,"litept_enabled=0;fa_enabled=1","1|42|1000","mIoU|throughput|peak_memory",FastAdapter main effect
+S3DIS,F1,L1 + FastAdapter,"2-2-2-6-2",on,"litept_enabled=1;fa_enabled=1","1|42|1000","mIoU|throughput|peak_memory",interaction between two context paths
+ScanObjectNN,B0,KPConvD-L current default,"3-3-9-12-3",off,"kp_mode=kpconvd;litept_enabled=0;first_inv_layer=1","1|42|1000","OA|mAcc|throughput|latency|peak_memory|params",reference baseline matching the current ScanObjectNN configuration
+ScanObjectNN,B0X,KPConvX-L optional baseline,"3-3-9-12-3",off,"kp_mode=kpconvx;litept_enabled=0;first_inv_layer=1","1|42|1000","OA|mAcc|throughput|latency|peak_memory|params",secondary baseline for explicit KPConvX comparison
+ScanObjectNN,L1,C-C-C-A-A small,"2-2-2-6-2",off,"litept_enabled=1;litept_conv_stages=3;litept_patch_size=64","1|42|1000","OA|mAcc|throughput|latency|peak_memory|params",main classification candidate
+ScanObjectNN,L2,L1 no PointROPE,"2-2-2-6-2",off,"L1;litept_rope_enabled=0","1|42|1000","OA|mAcc",PointROPE contribution
+ScanObjectNN,L3,C-C-X-A-A,"2-2-2-6-2",off,"litept_conv_stages=2;litept_handover_stage=3","1|42|1000","OA|mAcc|latency",handover contribution
+ScanObjectNN,F1,L1 + FastAdapter,"2-2-2-6-2",on,"litept_enabled=1;fa_enabled=1","1|42|1000","OA|mAcc|throughput|peak_memory",FastAdapter interaction
