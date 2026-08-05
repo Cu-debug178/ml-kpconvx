@@ -319,8 +319,10 @@ def adjust_config(cfg):
         if cfg.model.in_sub_size > 0:
             cfg.data.init_sub_size = cfg.model.in_sub_size
 
-    # Checkpoint gap
-    cfg.train.checkpoint_gap = cfg.train.max_epoch // 5
+    # Keep the rolling checkpoint every epoch. Preserve additional S3DIS
+    # checkpoints from epoch 150 onward for model selection and recovery.
+    cfg.train.checkpoint_start = 150
+    cfg.train.checkpoint_gap = 10
 
     # Learning rate
     raise_rate = (cfg.train.cyc_lr1 / cfg.train.cyc_lr0)**(1/cfg.train.cyc_raise_n)
@@ -389,6 +391,8 @@ if __name__ == '__main__':
                 'model.inv_groups',
                 'model.init_channels',
                 'model.first_inv_layer',
+                'train.batch_size',
+                'train.accum_batch',
                 'train.cyc_decrease10',
                 'train.max_epoch',
                 'model.fa_num_anchors',

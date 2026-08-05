@@ -550,6 +550,22 @@ class KPNeXt(nn.Module):
 
 
 
+    def litept_serialization_profile(self):
+        """Return serialization timings for the most recent forward pass."""
+
+        stages = {
+            int(stage): cache.profile_stats
+            for stage, cache in sorted(self._litept_patch_caches.items())
+        }
+        return {
+            "stages": stages,
+            "quantization_count": sum(v["quantization_count"] for v in stages.values()),
+            "layout_count": sum(v["layout_count"] for v in stages.values()),
+            "quantization_ms": sum(v["quantization_ms"] for v in stages.values()),
+            "layout_ms": sum(v["layout_ms"] for v in stages.values()),
+            "total_ms": sum(v["total_ms"] for v in stages.values()),
+        }
+
     def forward(self, batch, verbose=False):
 
         # Serialization is shared by all attention blocks in a stage, but must
@@ -760,7 +776,6 @@ class KPNeXt(nn.Module):
         correct = (predicted == target).sum().item()
 
         return correct / total
-
 
 
 

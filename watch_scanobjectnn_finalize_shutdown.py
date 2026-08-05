@@ -94,6 +94,38 @@ def contains_finished_marker(path: Path) -> bool:
         return False
 
 
+def file_signature(path: Path) -> tuple[int, int] | None:
+    """Return a cheap signature for detecting training-log progress."""
+    try:
+        stat_result = path.stat()
+    except OSError:
+        return None
+    return stat_result.st_size, stat_result.st_mtime_ns
+
+
+def gpu_utilization() -> float | None:
+    """Read GPU utilization without treating a failed query as idle."""
+    try:
+        completed = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if completed.returncode != 0:
+            return None
+        value = completed.stdout.strip().splitlines()[0].strip()
+        return float(value)
+    except (OSError, IndexError, ValueError, subprocess.SubprocessError):
+        return None
+
+
 def inspect_checkpoint(checkpoint_python: Path, script: Path, path: Path) -> int:
     completed = subprocess.run(
         [str(checkpoint_python), str(script), "--inspect-checkpoint", str(path)],
@@ -201,6 +233,23 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Shut down after monitoring completes (disabled by default).",
     )
+    parser.add_argument(
+        "--shutdown-on-interruption",
+        action="store_true",
+        help="Also shut down after a verified process interruption or idle timeout.",
+    )
+    parser.add_argument(
+        "--gpu-idle-shutdown-seconds",
+        type=float,
+        default=0.0,
+        help="Require this much stalled-log time with low GPU utilization before an idle shutdown.",
+    )
+    parser.add_argument(
+        "--gpu-idle-utilization-threshold",
+        type=float,
+        default=5.0,
+        help="GPU utilization percentage at or below which the idle timer may run.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     if args.pid <= 1 or args.start_ticks <= 0:
@@ -211,6 +260,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         parser.error("interval and dead-confirmations must be positive")
     if args.shutdown_delay_seconds < 0:
         parser.error("shutdown delay cannot be negative")
+    if args.gpu_idle_shutdown_seconds < 0:
+        parser.error("GPU idle timeout cannot be negative")
+    if not 0 <= args.gpu_idle_utilization_threshold <= 100:
+        parser.error("GPU idle utilization threshold must be between 0 and 100")
     return args
 
 
@@ -282,6 +335,9 @@ def monitor(args: argparse.Namespace) -> int:
         "result_dir": str(result_dir),
         "milestones": args.milestones,
         "final_epoch": args.final_epoch,
+        "shutdown_on_interruption": args.shutdown_on_interruption,
+        "gpu_idle_shutdown_seconds": args.gpu_idle_shutdown_seconds,
+        "gpu_idle_utilization_threshold": args.gpu_idle_utilization_threshold,
         "dry_run": args.dry_run,
     }
     atomic_write_json(state_dir / "state.json", armed)
@@ -291,6 +347,10 @@ def monitor(args: argparse.Namespace) -> int:
     archived: set[int] = set()
     dead_samples = 0
     last_heartbeat = 0.0
+    last_log_signature = file_signature(training_log)
+    last_log_progress = time.monotonic()
+    stop_reason: str | None = None
+    idle_log_signature: tuple[int, int] | None = None
     while not stop_requested:
         if (state_dir / "cancel").exists():
             cancelled = {**armed, "status": "cancelled", "finished_at": utc_now()}
@@ -305,6 +365,30 @@ def monitor(args: argparse.Namespace) -> int:
         )
         dead_samples = 0 if alive else dead_samples + 1
         training_epoch = latest_training_epoch(training_log)
+        now = time.monotonic()
+        current_log_signature = file_signature(training_log)
+        if current_log_signature != last_log_signature:
+            last_log_signature = current_log_signature
+            last_log_progress = now
+        stalled_seconds = max(0.0, now - last_log_progress)
+        current_gpu_utilization = gpu_utilization()
+        idle_timeout_triggered = (
+            alive
+            and args.gpu_idle_shutdown_seconds > 0
+            and current_gpu_utilization is not None
+            and current_gpu_utilization <= args.gpu_idle_utilization_threshold
+            and stalled_seconds >= args.gpu_idle_shutdown_seconds
+        )
+        if idle_timeout_triggered:
+            stop_reason = "gpu_idle_timeout"
+            idle_log_signature = current_log_signature
+            append_event(
+                state_dir,
+                "gpu_idle_timeout",
+                gpu_utilization=current_gpu_utilization,
+                stalled_seconds=stalled_seconds,
+                latest_training_epoch=training_epoch,
+            )
 
         for milestone in args.milestones:
             if milestone in archived or training_epoch is None or training_epoch < milestone:
@@ -326,14 +410,19 @@ def monitor(args: argparse.Namespace) -> int:
             if ok:
                 archived.add(milestone)
 
-        now = time.monotonic()
         status = {
             **armed,
-            "status": "running" if alive else "confirming_stopped",
+            "status": (
+                stop_reason
+                if stop_reason is not None
+                else "running" if alive else "confirming_stopped"
+            ),
             "checked_at": utc_now(),
             "latest_training_epoch": training_epoch,
             "archived_epochs": sorted(archived),
             "dead_samples": dead_samples,
+            "gpu_utilization": current_gpu_utilization,
+            "training_log_stalled_seconds": stalled_seconds,
         }
         atomic_write_json(state_dir / "state.json", status)
         if now - last_heartbeat >= 300:
@@ -344,10 +433,15 @@ def monitor(args: argparse.Namespace) -> int:
                 latest_training_epoch=training_epoch,
                 archived_epochs=sorted(archived),
                 dead_samples=dead_samples,
+                gpu_utilization=current_gpu_utilization,
+                training_log_stalled_seconds=stalled_seconds,
             )
             last_heartbeat = now
 
+        if idle_timeout_triggered:
+            break
         if dead_samples >= args.dead_confirmations:
+            stop_reason = "training_process_ended"
             break
         time.sleep(args.interval_seconds)
 
@@ -380,13 +474,38 @@ def monitor(args: argparse.Namespace) -> int:
         )
 
     normal_marker = contains_finished_marker(console_log)
-    result = (
-        "completed"
-        if normal_marker and final_archive_ok
-        else "completed_but_final_checkpoint_invalid"
-        if normal_marker
-        else "interrupted_or_failed"
+    if stop_reason == "gpu_idle_timeout":
+        result = "gpu_idle_timeout"
+    else:
+        result = (
+            "completed"
+            if normal_marker and final_archive_ok
+            else "completed_but_final_checkpoint_invalid"
+            if normal_marker
+            else "interrupted_or_failed"
+        )
+    # Never power off after an interrupted or failed training process. The
+    # shutdown option is reserved for a verified normal completion with the
+    # requested final checkpoint archived successfully.
+    shutdown_allowed = result == "completed" or (
+        args.shutdown_on_interruption
+        and result in {"interrupted_or_failed", "gpu_idle_timeout"}
     )
+    if args.shutdown_on_finish and not shutdown_allowed:
+        failed = {
+            **armed,
+            "status": result,
+            "finished_at": utc_now(),
+            "finished_marker": normal_marker,
+            "final_archive_ok": final_archive_ok,
+            "final_archive_detail": final_archive_detail,
+            "archived_epochs": sorted(archived),
+            "shutdown_skipped": True,
+            "shutdown_skip_reason": "normal completion was not verified",
+        }
+        atomic_write_json(state_dir / "state.json", failed)
+        append_event(state_dir, "shutdown_skipped", reason=result)
+        return 1
     if not args.shutdown_on_finish:
         completed = {
             **armed,
@@ -405,6 +524,7 @@ def monitor(args: argparse.Namespace) -> int:
         **armed,
         "status": "shutdown_delay",
         "training_result": result,
+        "shutdown_trigger": stop_reason or "normal_completion",
         "finished_marker": normal_marker,
         "final_archive_ok": final_archive_ok,
         "final_archive_detail": final_archive_detail,
@@ -428,6 +548,28 @@ def monitor(args: argparse.Namespace) -> int:
             atomic_write_json(state_dir / "state.json", cancelled)
             append_event(state_dir, "shutdown_cancelled_during_delay")
             return 0
+        if stop_reason == "gpu_idle_timeout":
+            resumed_signature = file_signature(training_log)
+            resumed_gpu_utilization = gpu_utilization()
+            if (
+                resumed_signature != idle_log_signature
+                or (
+                    resumed_gpu_utilization is not None
+                    and resumed_gpu_utilization > args.gpu_idle_utilization_threshold
+                )
+            ):
+                cancelled = {
+                    **scheduled,
+                    "status": "cancelled_after_gpu_activity_resumed",
+                    "resumed_gpu_utilization": resumed_gpu_utilization,
+                }
+                atomic_write_json(state_dir / "state.json", cancelled)
+                append_event(
+                    state_dir,
+                    "shutdown_cancelled_after_gpu_activity_resumed",
+                    gpu_utilization=resumed_gpu_utilization,
+                )
+                return 0
         time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
 
     claim = {

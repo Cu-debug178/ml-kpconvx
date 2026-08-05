@@ -14,6 +14,7 @@ from models.litept_blocks import (  # noqa: E402
     PointROPE,
     SerializedPatchCache,
     SerializedPointROPEAttention,
+    _morton_code,
     build_serialized_patches,
     parse_serialization_orders,
 )
@@ -36,6 +37,35 @@ class PointROPETests(unittest.TestCase):
 
 
 class SerializationTests(unittest.TestCase):
+
+    def test_vectorized_morton_matches_loop_reference(self):
+        torch.manual_seed(1)
+        coordinate_sets = [
+            torch.randint(0, 2 ** 20, (257, 3), dtype=torch.long),
+            torch.randint(0, 2 ** 27, (257, 3), dtype=torch.long),
+        ]
+        for coords in coordinate_sets:
+            for order in ("z", "z-trans"):
+                for max_bits in (5, 13, 20, 21):
+                    xyz = coords if order == "z" else coords[:, [1, 0, 2]]
+                    max_coord = xyz.amax().clamp(min=1)
+                    bits_needed = (
+                        torch.floor(torch.log2(max_coord.to(torch.float64))).to(torch.long)
+                        + 1
+                    )
+                    shift = torch.clamp(bits_needed - max_bits, min=0)
+                    shifted = torch.bitwise_right_shift(xyz, shift)
+                    reference = torch.zeros(coords.shape[0], dtype=torch.long)
+                    for bit in range(max_bits):
+                        reference |= ((shifted[:, 0] >> bit) & 1) << (3 * bit)
+                        reference |= ((shifted[:, 1] >> bit) & 1) << (3 * bit + 1)
+                        reference |= ((shifted[:, 2] >> bit) & 1) << (3 * bit + 2)
+                    self.assertTrue(
+                        torch.equal(
+                            _morton_code(coords, order=order, max_bits=max_bits),
+                            reference,
+                        )
+                    )
 
     def test_packed_clouds_are_partitioned_exactly_once(self):
         torch.manual_seed(2)
@@ -85,16 +115,20 @@ class SerializationTests(unittest.TestCase):
     def test_stage_cache_reuses_patch_metadata_until_cleared(self):
         points = torch.randn(9, 3)
         lengths = torch.tensor([4, 5], dtype=torch.long)
-        cache = SerializedPatchCache()
+        cache = SerializedPatchCache(profile_enabled=True)
         first = cache.get(points, lengths, 4, 0.1, "z")
         second = cache.get(points, lengths, 4, 0.1, "z")
         self.assertIs(first, second)
         cache.get(points, lengths, 4, 0.1, "z-trans")
         self.assertEqual(cache.quantization_count, 1)
         self.assertEqual(cache.layout_count, 2)
+        self.assertEqual(cache.profile_stats["quantization_count"], 1)
+        self.assertEqual(cache.profile_stats["layout_count"], 2)
+        self.assertGreaterEqual(cache.profile_stats["total_ms"], 0.0)
         cache.clear()
         self.assertEqual(cache.quantization_count, 0)
         self.assertEqual(cache.layout_count, 0)
+        self.assertEqual(cache.profile_stats["total_ms"], 0.0)
         third = cache.get(points, lengths, 4, 0.1, "z")
         self.assertIsNot(first, third)
 

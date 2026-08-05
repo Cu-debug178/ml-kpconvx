@@ -20,6 +20,7 @@
 # Basic libs
 import torch
 import numpy as np
+import os
 from os.path import exists, join
 import time
 
@@ -42,6 +43,15 @@ def training_epoch(epoch, t0, net, optimizer, training_loader, cfg, PID_file, de
     last_display = time.time()
     t = [time.time()]
     finished = True
+    smoke_metrics = os.environ.get('LITEPT_SMOKE_METRICS', '0') == '1'
+    profile_serialization = os.environ.get('LITEPT_PROFILE_SERIALIZATION', '0') == '1'
+    step_serialization = {
+        'quantization_count': 0,
+        'layout_count': 0,
+        'quantization_ms': 0.0,
+        'layout_ms': 0.0,
+        'total_ms': 0.0,
+    }
     optimizer.zero_grad()
 
     # Only save metrics 10 times per epoch
@@ -75,6 +85,8 @@ def training_epoch(epoch, t0, net, optimizer, training_loader, cfg, PID_file, de
             # New time at first accumulation step
             if mini_step % cfg.train.accum_batch == 0:
                 t = t[-1:]
+                for key in step_serialization:
+                    step_serialization[key] = 0
 
 
             if 'cuda' in device.type:
@@ -97,6 +109,14 @@ def training_epoch(epoch, t0, net, optimizer, training_loader, cfg, PID_file, de
 
             # Forward pass
             outputs = net(batch)
+
+            if profile_serialization:
+                profile_owner = net.module if hasattr(net, 'module') else net
+                profile_fn = getattr(profile_owner, 'litept_serialization_profile', None)
+                if profile_fn is not None:
+                    profile = profile_fn()
+                    for key in step_serialization:
+                        step_serialization[key] += profile[key]
             
             # Compute loss
             if 'lam' in batch.in_dict and len(batch.in_dict.lam) > 0:
@@ -108,7 +128,14 @@ def training_epoch(epoch, t0, net, optimizer, training_loader, cfg, PID_file, de
 
             # Normalize loss
             loss = loss / cfg.train.accum_batch
-            accum_loss += loss.item()
+            loss_value = loss.item()
+            if not np.isfinite(loss_value):
+                raise FloatingPointError(
+                    'Non-finite loss at epoch {:d}, mini-step {:d}: {}'.format(
+                        epoch, mini_step, loss_value
+                    )
+                )
+            accum_loss += loss_value
 
             if 'cuda' in device.type:
                 torch.cuda.synchronize(device)
@@ -139,11 +166,14 @@ def training_epoch(epoch, t0, net, optimizer, training_loader, cfg, PID_file, de
                 if 'cuda' in device.type:
                     cuda_stats = torch.cuda.memory_stats(device)
                     used_GPU_MB = cuda_stats["allocated_bytes.all.peak"]
+                    reserved_GPU_MB = cuda_stats["reserved_bytes.all.peak"]
                     _, tot_GPU_MB = torch.cuda.mem_get_info(device)
                     gpu_usage = 100 * used_GPU_MB / tot_GPU_MB
                     torch.cuda.reset_peak_memory_stats(device)
                 else:
                     gpu_usage = 0
+                    used_GPU_MB = 0
+                    reserved_GPU_MB = 0
 
                 # # Empty GPU cache (helps avoiding OOM errors)
                 # # Loses ~10% of speed but allows batch 2 x bigger.
@@ -213,6 +243,32 @@ def training_epoch(epoch, t0, net, optimizer, training_loader, cfg, PID_file, de
                                             1000 * mean_dt[2],
                                             1000 * mean_dt[3],
                                             1000 * mean_dt[4]))
+                    if smoke_metrics:
+                        step_ms = 1000 * np.sum(accum_dt)
+                        forward_ms = 1000 * accum_dt[2]
+                        serialization_ms = step_serialization['total_ms']
+                        serialization_pct = (
+                            100 * serialization_ms / forward_ms
+                            if forward_ms > 0 else 0.0
+                        )
+                        detail = (
+                            'Smoke metrics | peak_alloc={:.0f} MiB peak_reserved={:.0f} MiB '
+                            '| step={:.1f} ms '
+                            '| forward={:.1f} ms | serialization={:.1f} ms ({:.1f}%) '
+                            '[quantize={:.1f} ms/{} layout={:.1f} ms/{}]'
+                        )
+                        print(detail.format(
+                            used_GPU_MB / 1024 ** 2,
+                            reserved_GPU_MB / 1024 ** 2,
+                            step_ms,
+                            forward_ms,
+                            serialization_ms,
+                            serialization_pct,
+                            step_serialization['quantization_ms'],
+                            step_serialization['quantization_count'],
+                            step_serialization['layout_ms'],
+                            step_serialization['layout_count'],
+                        ))
 
                 # Log file
                 if cfg.exp.saving:
@@ -357,9 +413,6 @@ def training_epoch_debug(epoch, net, optimizer, training_loader, cfg, PID_file, 
     all_cuda_stats = np.array(all_cuda_stats, dtype=np.float32)
     
     return all_cuda_stats
-
-
-
 
 
 

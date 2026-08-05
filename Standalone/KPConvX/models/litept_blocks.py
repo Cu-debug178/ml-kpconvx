@@ -14,6 +14,8 @@ an optimized CUDA kernel when the installed PyTorch build supports it.
 from __future__ import annotations
 
 import math
+import os
+import time
 from typing import List, Sequence, Tuple
 
 import torch
@@ -109,12 +111,22 @@ def _morton_code(coords: Tensor, order: str = "z", max_bits: int = 20) -> Tensor
     shift = torch.clamp(bits_needed - max_bits, min=0)
     xyz = torch.bitwise_right_shift(xyz, shift)
 
-    code = torch.zeros((xyz.shape[0],), dtype=torch.long, device=xyz.device)
-    for bit in range(max_bits):
-        code |= ((xyz[:, 0] >> bit) & 1) << (3 * bit)
-        code |= ((xyz[:, 1] >> bit) & 1) << (3 * bit + 1)
-        code |= ((xyz[:, 2] >> bit) & 1) << (3 * bit + 2)
-    return code
+    # Spread each input bit across every third output bit.  This is exactly the
+    # loop-based Morton interleave, expressed as six vectorized mask/shift ops so
+    # CUDA does not launch three kernels for every coordinate bit.
+    def part1by2(values: Tensor) -> Tensor:
+        values = values & 0x1FFFFF
+        values = (values | (values << 32)) & 0x001F00000000FFFF
+        values = (values | (values << 16)) & 0x001F0000FF0000FF
+        values = (values | (values << 8)) & 0x100F00F00F00F00F
+        values = (values | (values << 4)) & 0x10C30C30C30C30C3
+        return (values | (values << 2)) & 0x1249249249249249
+
+    return (
+        part1by2(xyz[:, 0])
+        | (part1by2(xyz[:, 1]) << 1)
+        | (part1by2(xyz[:, 2]) << 2)
+    )
 
 
 def _packed_length_values(points: Tensor, lengths: Tensor) -> Tuple[int, ...]:
@@ -258,13 +270,24 @@ class SerializedPatchCache:
     ``KPNeXt.forward`` clears it before processing a new batch.
     """
 
-    def __init__(self):
+    def __init__(self, profile_enabled: bool | None = None):
         self._entries = {}
         self._quantized_entries = {}
+        if profile_enabled is None:
+            profile_enabled = os.environ.get("LITEPT_PROFILE_SERIALIZATION", "0") == "1"
+        self.profile_enabled = bool(profile_enabled)
+        self._quantization_time_ms = 0.0
+        self._layout_time_ms = 0.0
+        self._quantization_events = []
+        self._layout_events = []
 
     def clear(self):
         self._entries.clear()
         self._quantized_entries.clear()
+        self._quantization_time_ms = 0.0
+        self._layout_time_ms = 0.0
+        self._quantization_events.clear()
+        self._layout_events.clear()
 
     @property
     def quantization_count(self) -> int:
@@ -273,6 +296,46 @@ class SerializedPatchCache:
     @property
     def layout_count(self) -> int:
         return len(self._entries)
+
+    @property
+    def profile_stats(self):
+        quantization_ms = self._quantization_time_ms + self._event_time_ms(
+            self._quantization_events
+        )
+        layout_ms = self._layout_time_ms + self._event_time_ms(self._layout_events)
+        return {
+            "quantization_count": self.quantization_count,
+            "layout_count": self.layout_count,
+            "quantization_ms": quantization_ms,
+            "layout_ms": layout_ms,
+            "total_ms": quantization_ms + layout_ms,
+        }
+
+    def _profile_start(self, device: torch.device):
+        if not self.profile_enabled:
+            return None
+        if device.type == "cuda":
+            started = torch.cuda.Event(enable_timing=True)
+            started.record()
+            return "cuda", started
+        return "cpu", time.perf_counter()
+
+    def _profile_finish(self, started, device: torch.device):
+        if started is None:
+            return 0.0
+        mode, value = started
+        if mode == "cuda":
+            finished = torch.cuda.Event(enable_timing=True)
+            finished.record()
+            return value, finished
+        return 1000.0 * (time.perf_counter() - value)
+
+    @staticmethod
+    def _event_time_ms(events) -> float:
+        if not events:
+            return 0.0
+        events[-1][1].synchronize()
+        return sum(started.elapsed_time(finished) for started, finished in events)
 
     @torch.no_grad()
     def get(self, points: Tensor, lengths: Tensor, patch_size: int,
@@ -285,12 +348,19 @@ class SerializedPatchCache:
             tuple(lengths.shape),
         )
         if geometry_key not in self._quantized_entries:
+            started = self._profile_start(points.device)
             length_values = _packed_length_values(points, lengths)
             quantized = _quantize_packed_clouds(points, length_values, voxel_size)
             self._quantized_entries[geometry_key] = (length_values, quantized)
+            elapsed = self._profile_finish(started, points.device)
+            if isinstance(elapsed, tuple):
+                self._quantization_events.append(elapsed)
+            else:
+                self._quantization_time_ms += elapsed
 
         key = (order, int(patch_size), geometry_key)
         if key not in self._entries:
+            started = self._profile_start(points.device)
             length_values, quantized = self._quantized_entries[geometry_key]
             self._entries[key] = _build_patches_from_quantized(
                 points=points,
@@ -299,6 +369,11 @@ class SerializedPatchCache:
                 patch_size=patch_size,
                 order=order,
             )
+            elapsed = self._profile_finish(started, points.device)
+            if isinstance(elapsed, tuple):
+                self._layout_events.append(elapsed)
+            else:
+                self._layout_time_ms += elapsed
         return self._entries[key]
 
 

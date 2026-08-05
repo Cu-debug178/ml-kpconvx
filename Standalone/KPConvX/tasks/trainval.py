@@ -248,9 +248,19 @@ def train_and_validate(net, training_loader, val_loader, cfg, chkp_path=None, fi
             checkpoint_path = join(checkpoint_directory, 'current_chkp.tar')
             torch.save(save_dict, checkpoint_path)
 
-            # Save checkpoints occasionally
-            if (epoch + 1) % cfg.train.checkpoint_gap == 0:
-                checkpoint_path = join(checkpoint_directory, 'chkp_{:04d}.tar'.format(epoch + 1))
+            # Keep the rolling checkpoint every epoch and retain periodic copies.
+            # A configured start epoch is useful for long S3DIS runs where only
+            # later checkpoints are needed for model selection and recovery.
+            checkpoint_start = getattr(cfg.train, 'checkpoint_start', None)
+            if checkpoint_start is None:
+                save_periodic = (cfg.train.checkpoint_gap > 0
+                                 and epoch % cfg.train.checkpoint_gap == 0)
+            else:
+                save_periodic = (cfg.train.checkpoint_gap > 0
+                                 and epoch >= checkpoint_start
+                                 and (epoch - checkpoint_start) % cfg.train.checkpoint_gap == 0)
+            if save_periodic:
+                checkpoint_path = join(checkpoint_directory, 'chkp_{:04d}.tar'.format(epoch))
                 torch.save(save_dict, checkpoint_path)
 
         # Validation

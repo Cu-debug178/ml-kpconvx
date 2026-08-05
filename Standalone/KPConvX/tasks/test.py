@@ -146,11 +146,16 @@ def test_model(net, test_loader, cfg, on_gpu=True, save_visu=False, test_path=''
 
         
         if cfg.data.task == 'cloud_segmentation':
-            # Create new sampling points for next test epoch
+            # Pointcept-style fixed TTA reuses the same sampling points for
+            # every augmentation and only resets the read cursor.  The
+            # legacy random-vote protocol keeps regenerating points.
             t1 = time.time()
-            print('Creating new sampling points for next test epoch')
             test_loader.dataset.reg_sampling_i *= 0
-            test_loader.dataset.new_reg_sampling_pts()
+            if getattr(cfg.test, 'fixed_sampling', False):
+                print('Reusing fixed sampling points for next TTA vote')
+            else:
+                print('Creating new sampling points for next test epoch')
+                test_loader.dataset.new_reg_sampling_pts()
             test_loader.dataset.reg_votes += 1
             t2 = time.time()
             print('Done in {:.1f}s\n'.format(t2 - t1))
@@ -740,7 +745,6 @@ def object_classification_test(epoch, net, test_loader, cfg, test_data, device, 
         np.savetxt(conf_path, C2, '%15d')
 
     return
-
 
 
 
