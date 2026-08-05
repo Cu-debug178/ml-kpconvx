@@ -28,6 +28,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from utils.gpu_init import init_gpu
+from utils.training_schedule import periodic_checkpoint_due
 
 from tasks.training import training_epoch, training_epoch_debug
 from tasks.validation import validation_epoch
@@ -252,13 +253,11 @@ def train_and_validate(net, training_loader, val_loader, cfg, chkp_path=None, fi
             # A configured start epoch is useful for long S3DIS runs where only
             # later checkpoints are needed for model selection and recovery.
             checkpoint_start = getattr(cfg.train, 'checkpoint_start', None)
-            if checkpoint_start is None:
-                save_periodic = (cfg.train.checkpoint_gap > 0
-                                 and epoch % cfg.train.checkpoint_gap == 0)
-            else:
-                save_periodic = (cfg.train.checkpoint_gap > 0
-                                 and epoch >= checkpoint_start
-                                 and (epoch - checkpoint_start) % cfg.train.checkpoint_gap == 0)
+            save_periodic = periodic_checkpoint_due(
+                epoch,
+                cfg.train.checkpoint_gap,
+                checkpoint_start,
+            )
             if save_periodic:
                 checkpoint_path = join(checkpoint_directory, 'chkp_{:04d}.tar'.format(epoch))
                 torch.save(save_dict, checkpoint_path)

@@ -7,7 +7,7 @@
 #
 
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -199,12 +199,15 @@ class FastAdapterLayer(nn.Module):
         assignments: Tensor,
         point_to_anchor_offsets: Tensor,
         state: FastAdapterState,
-    ) -> Tuple[Tensor, FastAdapterState]:
+        capture_summary: bool = False,
+        capture_full: bool = False,
+    ) -> Tuple[Tensor, FastAdapterState, Dict[str, Any]]:
         anchor_count = int(state.anchor_points.shape[0])
+        input_features = features
 
         # P2A: geometry-aware local aggregation.
         point_geometry = self.geometry_mlp(point_to_anchor_offsets)
-        anchor_geometry, _ = self._scatter_mean(
+        anchor_geometry, anchor_counts = self._scatter_mean(
             point_geometry,
             assignments,
             anchor_count,
@@ -246,10 +249,54 @@ class FastAdapterLayer(nn.Module):
             )
         )
         correction = a2p_gate * (point_anchor_features + offsets)
-        features = features + correction * self.residual_scale.to(features.dtype)
+        scaled_correction = correction * self.residual_scale.to(features.dtype)
+        features = features + scaled_correction
+
+        diagnostics: Dict[str, Any] = {}
+        if capture_summary or capture_full:
+            feature_norm = input_features.detach().norm(dim=1).clamp_min(1e-8)
+            correction_norm = scaled_correction.detach().norm(dim=1)
+            correction_ratio = correction_norm / feature_norm
+            summary = {
+                "point_count": torch.tensor(
+                    float(features.shape[0]), device=features.device
+                ),
+                "anchor_count": torch.tensor(
+                    float(anchor_count), device=features.device
+                ),
+                "residual_scale_mean_abs": self.residual_scale.detach().abs().mean(),
+                "residual_scale_max_abs": self.residual_scale.detach().abs().max(),
+                "p2a_gate_mean": p2a_weights.detach().mean(),
+                "p2a_gate_std": p2a_weights.detach().std(unbiased=False),
+                "a2p_gate_mean": a2p_gate.detach().mean(),
+                "a2p_gate_std": a2p_gate.detach().std(unbiased=False),
+                "a2p_gate_low_fraction": (a2p_gate.detach() < 0.05).float().mean(),
+                "a2p_gate_high_fraction": (a2p_gate.detach() > 0.95).float().mean(),
+                "correction_ratio_mean": correction_ratio.mean(),
+                "correction_ratio_p90": torch.quantile(correction_ratio, 0.9),
+                "anchor_occupancy_mean": anchor_counts.detach().mean(),
+                "anchor_occupancy_max": anchor_counts.detach().max(),
+            }
+            if self.spatial_attention is not None:
+                summary["spatial_out_proj_norm"] = (
+                    self.spatial_attention.out_proj.weight.detach().norm()
+                )
+            diagnostics["summary"] = summary
+
+            if capture_full:
+                diagnostics["full"] = {
+                    "assignments": assignments.detach(),
+                    "point_to_anchor_offsets": point_to_anchor_offsets.detach(),
+                    "p2a_weights": p2a_weights.detach().squeeze(1),
+                    "a2p_gate": a2p_gate.detach().squeeze(1),
+                    "correction_norm": correction_norm,
+                    "correction_ratio": correction_ratio,
+                    "anchor_features": anchor_features.detach(),
+                    "anchor_counts": anchor_counts.detach().squeeze(1),
+                }
 
         state.previous_anchor_features = anchor_features
-        return features, state
+        return features, state, diagnostics
 
 
 class FastAdapterStack(nn.Module):
@@ -306,6 +353,23 @@ class FastAdapterStack(nn.Module):
             )
             previous_channels = int(channels)
         self.layers = nn.ModuleList(layers)
+        self._capture_summary = False
+        self._capture_full = False
+        self._last_diagnostics: Dict[str, Any] = {}
+
+    def set_diagnostics_mode(
+        self,
+        summary: bool = False,
+        full: bool = False,
+    ) -> None:
+        """Enable one-forward diagnostics without changing normal training cost."""
+
+        self._capture_full = bool(full)
+        self._capture_summary = bool(summary or full)
+        self._last_diagnostics = {}
+
+    def diagnostics(self) -> Dict[str, Any]:
+        return self._last_diagnostics
 
     @staticmethod
     @torch.no_grad()
@@ -394,7 +458,7 @@ class FastAdapterStack(nn.Module):
         if start != int(source_points.shape[0]):
             raise ValueError("Pyramid lengths do not match the packed points")
 
-        return FastAdapterState(
+        state = FastAdapterState(
             anchor_points=torch.cat(anchors, dim=0),
             anchor_lengths=torch.tensor(
                 anchor_lengths,
@@ -402,6 +466,13 @@ class FastAdapterStack(nn.Module):
                 device=source_points.device,
             ),
         )
+        if self._capture_summary:
+            self._last_diagnostics = {
+                "anchor_points": state.anchor_points.detach() if self._capture_full else None,
+                "anchor_lengths": state.anchor_lengths.detach(),
+                "layers": {},
+            }
+        return state
 
     @torch.no_grad()
     def _assign_points_to_anchors(
@@ -470,9 +541,20 @@ class FastAdapterStack(nn.Module):
             point_lengths,
             state,
         )
-        return self.layers[layer_index](
+        features, state, diagnostics = self.layers[layer_index](
             features,
             assignments,
             offsets,
             state,
+            capture_summary=self._capture_summary,
+            capture_full=self._capture_full,
         )
+        if self._capture_summary:
+            if not self._last_diagnostics:
+                self._last_diagnostics = {
+                    "anchor_points": state.anchor_points.detach() if self._capture_full else None,
+                    "anchor_lengths": state.anchor_lengths.detach(),
+                    "layers": {},
+                }
+            self._last_diagnostics["layers"][int(layer_index)] = diagnostics
+        return features, state

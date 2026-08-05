@@ -1,0 +1,4 @@
+segment,epoch_start,epoch_end,count,mean_full_mIoU,std_full_mIoU,min_full_mIoU,max_full_mIoU,best_epoch,source
+observed_plateau_window,150,250,11,71.4636,0.3625,70.9,72.1,210,user_provided_checkpoint_summary
+late_training_window,260,450,20,71.6500,0.1628,71.3,71.9,290_or_400,user_provided_checkpoint_summary
+all_reported_checkpoints,89,450,33,not_recorded,not_recorded,69.7,72.1,210,user_provided_checkpoint_summary

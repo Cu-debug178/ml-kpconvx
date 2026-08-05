@@ -1,0 +1,7 @@
+priority,experiment,runner,depth,decoder,pointrope,fastadapter,max_epoch,cyc_decrease10,checkpoint_start,checkpoint_gap,seed,primary_comparison,purpose
+1,L0D,run_S3DIS_litept_l0d_250_seed57106803.sh,"3-3-9-12-3",light,on,off,250,62,200,10,57106803,L0,decoder ablation using the existing L0 reference
+2,L1,run_S3DIS_litept_l1_250_seed57106803.sh,"2-2-2-6-2",light,on,off,250,62,200,10,57106803,L0D,depth compression ablation
+3,L2,run_S3DIS_litept_l2_250_seed57106803.sh,"2-2-2-6-2",light,off,off,250,62,200,10,57106803,L1,PointROPE ablation
+4,F0,run_S3DIS_kpconvx_fastadapter_250_seed57106803.sh,"3-3-9-12-3",heavy,na,on,250,62,200,10,57106803,B0,FastAdapter effect on the existing grid KPConvX reference
+5,L0+FA,run_S3DIS_litept_l0_fastadapter_250_seed57106803.sh,"3-3-9-12-3",heavy,on,on,250,62,200,10,57106803,L0,interaction between token attention and FastAdapter
+6,diagnostics,analyze_S3DIS_grid_vs_fastadapter_multi.sh,checkpoint analysis,na,na,grid-vs-grid+FA,na,na,na,na,na,F0-vs-B0,joint PCA plus grid degradation and adapter response

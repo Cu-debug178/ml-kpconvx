@@ -80,6 +80,24 @@ class FastAdapterTest(unittest.TestCase):
             with self.subTest(anchor_mode=anchor_mode):
                 run_packed_forward_backward(anchor_mode)
 
+
+    def test_full_diagnostics_expose_pointwise_adapter_response(self):
+        torch.manual_seed(9)
+        points = torch.randn(12, 3)
+        lengths = torch.tensor([12], dtype=torch.long)
+        stack = FastAdapterStack([8], make_cfg("stride"))
+        stack.set_diagnostics_mode(summary=True, full=True)
+        state = stack.initialize_state([points], [lengths])
+        features = torch.randn(12, 8)
+        output, _ = stack.forward_layer(0, points, lengths, features, state)
+        diagnostics = stack.diagnostics()
+        self.assertEqual(tuple(output.shape), (12, 8))
+        self.assertIn(0, diagnostics["layers"])
+        full = diagnostics["layers"][0]["full"]
+        self.assertEqual(tuple(full["correction_ratio"].shape), (12,))
+        self.assertEqual(tuple(full["a2p_gate"].shape), (12,))
+        self.assertTrue(torch.isfinite(full["correction_ratio"]).all())
+
     def test_rejects_mismatched_packed_lengths(self):
         stack = FastAdapterStack([8], make_cfg())
         points = torch.randn(6, 3)

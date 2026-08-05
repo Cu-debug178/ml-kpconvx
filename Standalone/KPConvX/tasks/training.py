@@ -25,6 +25,13 @@ from os.path import exists, join
 import time
 
 from utils.printing import underline
+from utils.training_schedule import optimizer_step_monitor_due
+from utils.training_monitor import (append_fast_adapter_monitor,
+                                    append_optimization_monitor,
+                                    capture_parameter_samples,
+                                    collect_parameter_statistics,
+                                    collect_sampled_update_statistics,
+                                    merge_update_statistics)
 
 # ----------------------------------------------------------------------------------------------------------------------
 #
@@ -45,6 +52,9 @@ def training_epoch(epoch, t0, net, optimizer, training_loader, cfg, PID_file, de
     finished = True
     smoke_metrics = os.environ.get('LITEPT_SMOKE_METRICS', '0') == '1'
     profile_serialization = os.environ.get('LITEPT_PROFILE_SERIALIZATION', '0') == '1'
+    monitor_enabled = bool(getattr(cfg.train, 'monitor_enabled', False))
+    monitor_interval = max(1, int(getattr(cfg.train, 'monitor_interval', 50)))
+    monitor_owner = net.module if hasattr(net, 'module') else net
     step_serialization = {
         'quantization_count': 0,
         'layout_count': 0,
@@ -107,6 +117,19 @@ def training_epoch(epoch, t0, net, optimizer, training_loader, cfg, PID_file, de
                 torch.cuda.synchronize(device)
             t += [time.time()]
 
+            # Enable diagnostics only on the final mini-batch of selected
+            # accumulation windows. Normal forwards retain their original cost.
+            monitor_this_step = optimizer_step_monitor_due(
+                monitor_enabled,
+                mini_step,
+                step,
+                cfg.train.accum_batch,
+                monitor_interval,
+            )
+            monitor_setter = getattr(monitor_owner, 'set_runtime_monitoring', None)
+            if monitor_setter is not None:
+                monitor_setter(monitor_this_step)
+
             # Forward pass
             outputs = net(batch)
 
@@ -144,6 +167,16 @@ def training_epoch(epoch, t0, net, optimizer, training_loader, cfg, PID_file, de
             # Backward gradients
             loss.backward()
 
+            monitor_statistics = None
+            monitor_adapter = None
+            monitor_parameter_samples = None
+            if monitor_this_step:
+                monitor_statistics = collect_parameter_statistics(net)
+                monitor_parameter_samples = capture_parameter_samples(net)
+                adapter_getter = getattr(monitor_owner, 'runtime_monitoring_stats', None)
+                if adapter_getter is not None:
+                    monitor_adapter = adapter_getter()
+
             if 'cuda' in device.type:
                 torch.cuda.synchronize(device)
             t += [time.time()]
@@ -158,6 +191,29 @@ def training_epoch(epoch, t0, net, optimizer, training_loader, cfg, PID_file, de
 
                 # Optimizer step
                 optimizer.step()
+
+                if monitor_this_step and monitor_parameter_samples is not None:
+                    monitor_statistics = merge_update_statistics(
+                        monitor_statistics,
+                        collect_sampled_update_statistics(monitor_parameter_samples),
+                    )
+
+                if monitor_this_step and cfg.exp.saving:
+                    global_step = epoch * max(int(cfg.train.steps_per_epoch), 1) + step
+                    append_optimization_monitor(
+                        cfg.exp.log_dir,
+                        epoch,
+                        global_step,
+                        [group['lr'] for group in optimizer.param_groups],
+                        monitor_statistics,
+                    )
+                    if monitor_adapter:
+                        append_fast_adapter_monitor(
+                            cfg.exp.log_dir,
+                            epoch,
+                            global_step,
+                            monitor_adapter,
+                        )
                 
                 # zero the parameter gradients
                 optimizer.zero_grad()

@@ -208,6 +208,40 @@ class KPNeXtLitePTIntegrationTests(unittest.TestCase):
         logits.mean().backward()
         self.assertTrue(torch.isfinite(logits).all())
 
+
+
+    def test_runtime_monitoring_is_one_shot(self):
+        torch.manual_seed(14)
+        cfg = _make_config("cloud_segmentation")
+        cfg.model.fa_enabled = True
+        model = KPNeXt(cfg)
+        batch = _make_batch(input_channels=5)
+        model.set_runtime_monitoring(True)
+        logits = model(batch)
+        self.assertEqual(tuple(logits.shape), (40, 4))
+        stats = model.runtime_monitoring_stats()
+        self.assertIn(0, stats["layers"])
+        self.assertIn("correction_ratio_mean", stats["layers"][0]["summary"])
+        self.assertFalse(model._runtime_monitoring_enabled)
+
+    def test_intermediate_trace_contains_all_encoder_stages(self):
+        torch.manual_seed(13)
+        cfg = _make_config("cloud_segmentation")
+        cfg.model.fa_enabled = True
+        model = KPNeXt(cfg)
+        batch = _make_batch(input_channels=5)
+        logits, trace = model(
+            batch,
+            return_intermediates=True,
+            capture_adapter_details=True,
+        )
+        self.assertEqual(tuple(logits.shape), (40, 4))
+        self.assertEqual(len(trace["stages"]), 5)
+        self.assertEqual(len(trace["points"]), 5)
+        self.assertEqual(len(trace["upsamples"]), 4)
+        self.assertIn(0, trace["adapter"]["layers"])
+        self.assertIn("correction_ratio", trace["adapter"]["layers"][0]["full"])
+
     def test_litept_and_fastadapter_compose_in_one_forward(self):
         torch.manual_seed(12)
         cfg = _make_config("cloud_segmentation")

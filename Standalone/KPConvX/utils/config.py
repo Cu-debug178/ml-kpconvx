@@ -191,6 +191,8 @@ def init_cfg():
     cfg.train.lr_decays = {'10': 0.1}   #  Dict, decay values with their epoch {epoch: decay}
     cfg.train.warmup = True             #  Bool, should the first epoch be a warmup
     cfg.train.grad_clip = 100.0         #   Int, gradient clipping value (negative means no clipping)
+    cfg.train.monitor_enabled = False   #  Bool, periodically log optimizer/module diagnostics
+    cfg.train.monitor_interval = 50     #   Int, optimizer steps between diagnostic snapshots
     cfg.train.class_w = []              #  List, weight for each class in the segmentation loss
     cfg.train.smooth_labels = False     #  Bool, should smooth labels for cross entropy loss?
 

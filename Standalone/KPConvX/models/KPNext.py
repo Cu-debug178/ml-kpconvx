@@ -144,6 +144,7 @@ class KPNeXt(nn.Module):
             self.fast_adapter = FastAdapterStack(adapter_channels, cfg.model)
         else:
             self.fast_adapter = None
+        self._runtime_monitoring_enabled = False
 
         # Verify the architecture validity
         if self.layer_blocks[0] < 1:
@@ -550,6 +551,23 @@ class KPNeXt(nn.Module):
 
 
 
+    def set_runtime_monitoring(self, enabled=True):
+        """Enable cheap summary diagnostics for the next forward only.
+
+        Training keeps this disabled except on configured monitor steps, so the
+        default path has no reductions, host synchronisations, or retained
+        intermediate tensors.
+        """
+
+        self._runtime_monitoring_enabled = bool(enabled)
+        if self.fast_adapter is not None:
+            self.fast_adapter.set_diagnostics_mode(summary=enabled, full=False)
+
+    def runtime_monitoring_stats(self):
+        if self.fast_adapter is None:
+            return {}
+        return self.fast_adapter.diagnostics()
+
     def litept_serialization_profile(self):
         """Return serialization timings for the most recent forward pass."""
 
@@ -566,12 +584,34 @@ class KPNeXt(nn.Module):
             "total_ms": sum(v["total_ms"] for v in stages.values()),
         }
 
-    def forward(self, batch, verbose=False):
+    def forward(
+        self,
+        batch,
+        verbose=False,
+        return_intermediates=False,
+        capture_adapter_details=False,
+    ):
 
         # Serialization is shared by all attention blocks in a stage, but must
         # be rebuilt for each new batch because point coordinates change.
         for patch_cache in self._litept_patch_caches.values():
             patch_cache.clear()
+
+        if self.fast_adapter is not None:
+            self.fast_adapter.set_diagnostics_mode(
+                summary=self._runtime_monitoring_enabled or return_intermediates,
+                full=capture_adapter_details,
+            )
+
+        trace = None
+        if return_intermediates:
+            trace = {
+                "stages": [],
+                "points": [],
+                "lengths": [],
+                "upsamples": [],
+                "labels": None,
+            }
 
         #  ------ Init ------
         
@@ -590,6 +630,13 @@ class KPNeXt(nn.Module):
                          self.upsample_n,
                          sub_mode=self.in_sub_mode,
                          grid_pool_mode=self.grid_pool)
+
+        if return_intermediates:
+            trace["points"] = [point.detach() for point in batch.in_dict.points]
+            trace["lengths"] = [length.detach() for length in batch.in_dict.lengths]
+            trace["upsamples"] = [up.detach() for up in batch.in_dict.upsamples]
+            if "labels" in batch.in_dict:
+                trace["labels"] = batch.in_dict.labels.detach()
 
         if verbose:
             torch.cuda.synchronize(batch.device())                           
@@ -635,6 +682,7 @@ class KPNeXt(nn.Module):
                     feats, upcut = block(batch.in_dict.points[l], batch.in_dict.points[l], feats, batch.in_dict.neighbors[l], batch.in_dict.lengths[l], upcut=upcut)
 
             # Compensate geometry before skip storage and downsampling.
+            pre_adapter_features = feats
             if self.fast_adapter is not None:
                 feats, fa_state = self.fast_adapter.forward_layer(
                     l,
@@ -643,6 +691,13 @@ class KPNeXt(nn.Module):
                     feats,
                     fa_state,
                 )
+
+            if return_intermediates:
+                trace["stages"].append({
+                    "stage": l,
+                    "pre_adapter_features": pre_adapter_features.detach(),
+                    "post_adapter_features": feats.detach(),
+                })
                 
             if layer < self.num_layers:
 
@@ -712,6 +767,19 @@ class KPNeXt(nn.Module):
                 message += ' {:5.1f}'.format(dt)
             print(message)
 
+        if return_intermediates:
+            trace["adapter"] = (
+                self.fast_adapter.diagnostics()
+                if self.fast_adapter is not None
+                else {}
+            )
+
+        # Summary monitoring is one-shot. The training loop explicitly enables
+        # it again on the next requested optimizer step.
+        self._runtime_monitoring_enabled = False
+
+        if return_intermediates:
+            return logits, trace
         return logits
 
     def loss(self, outputs, labels):

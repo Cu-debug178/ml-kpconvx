@@ -49,6 +49,7 @@ sys.path.append(parent)
 from utils.config import init_cfg, load_cfg, save_cfg, get_directories
 from utils.printing import frame_lines_1, underline
 from utils.gpu_init import init_gpu
+from utils.training_schedule import rebuild_cyclic_lr
 
 from models.KPNext import KPNeXt
 from models.KPConvNet import KPFCNN as KPConvFCNN
@@ -199,6 +200,8 @@ def my_config():
 
     # Training length
     cfg.train.max_epoch = 450  # 100
+    cfg.train.checkpoint_start = 150
+    cfg.train.checkpoint_gap = 10
     
     # Deformations
     cfg.train.deform_loss_factor = 0.1      # Reduce to reduce influence for deformation on overall features
@@ -210,6 +213,8 @@ def my_config():
     cfg.train.adam_eps = 1e-08
     cfg.train.weight_decay = 0.05     # for KPConv
     # cfg.train.weight_decay = 0.0001     # for transformer
+    cfg.train.monitor_enabled = False
+    cfg.train.monitor_interval = 50
 
     # Cyclic lr 
     cfg.train.cyc_lr0 = 1e-4                # Float, Start (minimum) learning rate of 1cycle decay
@@ -319,18 +324,10 @@ def adjust_config(cfg):
         if cfg.model.in_sub_size > 0:
             cfg.data.init_sub_size = cfg.model.in_sub_size
 
-    # Keep the rolling checkpoint every epoch. Preserve additional S3DIS
-    # checkpoints from epoch 150 onward for model selection and recovery.
-    cfg.train.checkpoint_start = 150
-    cfg.train.checkpoint_gap = 10
-
     # Learning rate
-    raise_rate = (cfg.train.cyc_lr1 / cfg.train.cyc_lr0)**(1/cfg.train.cyc_raise_n)
-    decrease_rate = 0.1**(1 / cfg.train.cyc_decrease10)
-    cfg.train.lr = cfg.train.cyc_lr0
-    cfg.train.lr_decays = {str(i): raise_rate for i in range(1, cfg.train.cyc_raise_n + 1)}
-    for i in range(cfg.train.cyc_raise_n + 1 + cfg.train.cyc_plateau, cfg.train.max_epoch):
-        cfg.train.lr_decays[str(i)] = decrease_rate
+    # This runs after CLI overrides, so compressed 250-epoch launchers rebuild
+    # the schedule with their final max_epoch and cyc_decrease10 values.
+    rebuild_cyclic_lr(cfg.train)
 
     # Test
     cfg.augment_test.chromatic_norm = cfg.augment_train.chromatic_norm
@@ -395,6 +392,9 @@ if __name__ == '__main__':
                 'train.accum_batch',
                 'train.cyc_decrease10',
                 'train.max_epoch',
+                'train.checkpoint_start',
+                'train.checkpoint_gap',
+                'train.monitor_interval',
                 'model.fa_num_anchors',
                 'model.fa_anchor_level',
                 'model.fa_geometry_dim',
@@ -407,7 +407,8 @@ if __name__ == '__main__':
                 'model.litept_num_heads',
                 'exp.seed']
 
-    bool_args = ['model.use_strided_conv',
+    bool_args = ['train.monitor_enabled',
+                 'model.use_strided_conv',
                  'model.inv_grp_norm',
                  'model.kpx_upcut',
                  'data.use_cubes',
