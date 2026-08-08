@@ -4,10 +4,11 @@
 
 - Status: completed after one interruption and checkpoint resume.
 - Dataset protocol: S3DIS, train on Areas 1-4 and 6; validate/evaluate on Area 5.
-- Model: KPConvX-L, 18,288,909 parameters, FastAdapter disabled.
+- Model: KPConvX-L (`kp_mode=kpconvx`), 18,288,909 parameters, FastAdapter disabled.
+- Encoder depth: `(3,3,9,12,3)`; LitePT/PointROPE disabled; heavy decoder enabled (`decoder_layer=true`).
 - Seed: `57106803`.
-- Best validation checkpoint: epoch 348, validation mIoU 75.7385%.
-- Final checkpoint: 10-vote full-cloud mIoU 71.4%.
+- Best validation result: epoch 348, validation mIoU 75.7385%.
+- Best among the tested checkpoints on 10-vote full-cloud evaluation: epoch 450, mIoU 71.4%.
 - Exact training Git commit: not recorded.
 
 The missing run commit is a provenance gap. The repository commit that publishes
@@ -22,9 +23,17 @@ this report must not be interpreted as the exact code revision used for training
 | Optimizer | AdamW |
 | Initial learning rate | 0.0001 |
 | Weight decay | 0.05 |
+| Input features | 5 |
+| Initial channels / channel scaling | 64 / 1.41 |
+| Input subsampling | grid, `in_sub_size=0.04` |
+| Input radius / radius scaling | 2.1 / 2.2 |
+| Grid pooling | enabled |
+| Neighbor limits | `[12,16,20,20,20]` |
+| LitePT / PointROPE | disabled |
+| FastAdapter | disabled |
+| Decoder | heavy; `decoder_layer=true` |
 | Batch size | 4 |
 | Gradient accumulation | 6 |
-| Input radius | 2.1 |
 | Training workers | 10 |
 | Test votes | 10 |
 | Test batch size | 1 |
@@ -62,7 +71,7 @@ full-cloud evaluation despite having a lower final validation snapshot mIoU.
 | Checkpoint role | Epoch | Validation mIoU | 10-vote sub-cloud mIoU | 10-vote full-cloud mIoU |
 |---|---:|---:|---:|---:|
 | Best validation | 348 | 75.7385% | 70.9% | 71.1% |
-| Final | 450 | 72.0% | 71.1% | 71.4% |
+| Best tested full-cloud | 450 | 72.0% | 71.1% | 71.4% |
 
 Checkpoint file names in the CSV are identifiers only. No checkpoint data is
 included in this repository.

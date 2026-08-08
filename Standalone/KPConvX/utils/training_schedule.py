@@ -2,7 +2,90 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+import math
+from typing import Any, Dict, Mapping
+
+
+class EpochMultiplicativeLRScheduler:
+    """Checkpointable form of KPConvX's existing epoch LR updates.
+
+    The original training loop multiplied every optimizer learning rate by
+    ``train_cfg.lr_decays[str(epoch)]`` after a successfully completed epoch.
+    This object preserves that exact update order while exposing a strict
+    ``state_dict``/``load_state_dict`` interface for interruption recovery.
+    """
+
+    STATE_VERSION = 1
+
+    def __init__(self, optimizer: Any, lr_decays: Mapping[str, float]) -> None:
+        self.optimizer = optimizer
+        self.lr_decays = {
+            int(epoch): float(factor) for epoch, factor in lr_decays.items()
+        }
+        if any(epoch < 0 for epoch in self.lr_decays):
+            raise ValueError("learning-rate decay epochs must be non-negative")
+        if any(not math.isfinite(factor) or factor <= 0 for factor in self.lr_decays.values()):
+            raise ValueError("learning-rate decay factors must be finite and positive")
+        self.last_epoch = -1
+        self._last_lr = self.get_last_lr()
+
+    def get_last_lr(self) -> list[float]:
+        return [float(group["lr"]) for group in self.optimizer.param_groups]
+
+    def step(self, epoch: int | None = None) -> None:
+        next_epoch = self.last_epoch + 1 if epoch is None else int(epoch)
+        if next_epoch != self.last_epoch + 1:
+            raise ValueError(
+                "scheduler epochs must be consecutive: expected {:d}, got {:d}".format(
+                    self.last_epoch + 1, next_epoch
+                )
+            )
+        factor = self.lr_decays.get(next_epoch, 1.0)
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] *= factor
+        self.last_epoch = next_epoch
+        self._last_lr = self.get_last_lr()
+
+    def state_dict(self) -> dict[str, Any]:
+        return {
+            "version": self.STATE_VERSION,
+            "last_epoch": self.last_epoch,
+            "last_lr": list(self._last_lr),
+            "lr_decays": dict(self.lr_decays),
+        }
+
+    def load_state_dict(self, state_dict: Mapping[str, Any]) -> None:
+        version = int(state_dict.get("version", 0))
+        if version != self.STATE_VERSION:
+            raise ValueError("unsupported scheduler state version: {:d}".format(version))
+        saved_decays = {
+            int(epoch): float(factor)
+            for epoch, factor in dict(state_dict["lr_decays"]).items()
+        }
+        if saved_decays != self.lr_decays:
+            raise ValueError("checkpoint learning-rate schedule differs from the run config")
+
+        saved_lrs = [float(value) for value in state_dict["last_lr"]]
+        current_lrs = self.get_last_lr()
+        if len(saved_lrs) != len(current_lrs) or any(
+            not math.isclose(saved, current, rel_tol=1e-12, abs_tol=0.0)
+            for saved, current in zip(saved_lrs, current_lrs)
+        ):
+            raise ValueError(
+                "optimizer learning rates do not match the scheduler checkpoint: "
+                "optimizer={!r}, scheduler={!r}".format(current_lrs, saved_lrs)
+            )
+        self.last_epoch = int(state_dict["last_epoch"])
+        self._last_lr = saved_lrs
+
+    def align_legacy_checkpoint(self, next_epoch: int) -> None:
+        """Align state for a checkpoint written before scheduler serialization."""
+
+        next_epoch = int(next_epoch)
+        if next_epoch < 0:
+            raise ValueError("checkpoint epoch must be non-negative")
+        self.last_epoch = next_epoch - 1
+        self._last_lr = self.get_last_lr()
 
 
 def rebuild_cyclic_lr(train_cfg: Any) -> Dict[str, float]:

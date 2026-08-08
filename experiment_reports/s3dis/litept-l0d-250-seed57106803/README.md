@@ -8,7 +8,8 @@
 - Dataset and split: S3DIS Area_5；训练/验证/测试协议沿用该实验目录配置
 - Model: LitePT L0D；encoder blocks `(3,3,9,12,3)`，C-C-C-A-A，PointROPE 开启，patch size `128`，light decoder，FastAdapter 关闭
 - Seed: `57106803`
-- Primary result: full-cloud mIoU `71.8%`，checkpoint `chkp_0150`，10-vote 测试
+- Best validation result: epoch `144`，validation mIoU `75.4%`
+- Best tested full-cloud result: epoch `150`，10-vote full-cloud mIoU `71.8%`
 
 ## Configuration
 
@@ -16,6 +17,10 @@
 - Training budget: `250` epochs；checkpoint archive from epoch 100 every 5 epochs
 - Decoder: light LayerNorm decoder，额外 decoder layer 关闭
 - FastAdapter: disabled
+- KP operator: `kpconvx`; input features `5`; initial channels `64`; channel scaling `1.41`
+- Input subsampling: grid，`in_sub_size=0.04`; input radius `2.1`; radius scaling `2.2`
+- Grid pooling: enabled; neighbor limits `[12,16,20,20,20]`
+- Optimizer: AdamW；初始 learning rate `1e-4`，weight decay `0.05`
 - Validation best: `75.4%`（validation epoch 144）；epoch 250 validation 为 `75.4%`（日志原始精度约 `75.39%`）
 
 ## Protocol

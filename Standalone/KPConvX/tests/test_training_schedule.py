@@ -3,6 +3,7 @@ import os
 import sys
 import unittest
 
+import torch
 from easydict import EasyDict
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -10,6 +11,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from utils.training_schedule import (
+    EpochMultiplicativeLRScheduler,
     optimizer_step_monitor_due,
     periodic_checkpoint_due,
     rebuild_cyclic_lr,
@@ -76,6 +78,50 @@ class TrainingScheduleTests(unittest.TestCase):
             )
         ]
         self.assertEqual(selected, [5, 17])
+
+    def test_checkpointable_scheduler_matches_original_epoch_updates(self):
+        train_cfg = self.make_train_cfg(250, 62)
+        decays = rebuild_cyclic_lr(train_cfg)
+        parameter = torch.nn.Parameter(torch.tensor(1.0))
+        optimizer = torch.optim.AdamW([parameter], lr=train_cfg.lr)
+        scheduler = EpochMultiplicativeLRScheduler(optimizer, decays)
+
+        expected_lr = train_cfg.lr
+        for epoch in range(train_cfg.max_epoch):
+            expected_lr *= decays.get(str(epoch), 1.0)
+            scheduler.step(epoch)
+            self.assertTrue(
+                math.isclose(optimizer.param_groups[0]['lr'], expected_lr, rel_tol=1e-12)
+            )
+
+    def test_scheduler_state_restores_next_epoch_exactly(self):
+        decays = {'1': 2.0, '2': 0.5, '4': 0.1}
+        parameter = torch.nn.Parameter(torch.tensor(1.0))
+        optimizer = torch.optim.SGD([parameter], lr=0.1, momentum=0.9)
+        scheduler = EpochMultiplicativeLRScheduler(optimizer, decays)
+        for epoch in range(3):
+            scheduler.step(epoch)
+
+        optimizer_state = optimizer.state_dict()
+        scheduler_state = scheduler.state_dict()
+
+        restored_parameter = torch.nn.Parameter(torch.tensor(1.0))
+        restored_optimizer = torch.optim.SGD(
+            [restored_parameter], lr=0.1, momentum=0.9
+        )
+        restored_scheduler = EpochMultiplicativeLRScheduler(
+            restored_optimizer, decays
+        )
+        restored_optimizer.load_state_dict(optimizer_state)
+        restored_scheduler.load_state_dict(scheduler_state)
+
+        scheduler.step(3)
+        restored_scheduler.step(3)
+        self.assertEqual(restored_scheduler.last_epoch, scheduler.last_epoch)
+        self.assertEqual(
+            restored_optimizer.param_groups[0]['lr'],
+            optimizer.param_groups[0]['lr'],
+        )
 
 
 if __name__ == "__main__":

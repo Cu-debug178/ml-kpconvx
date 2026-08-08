@@ -10,6 +10,8 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 export DATASET_PATH LOG_PATH PYTHON_BIN SEED=57106803 FA_ENABLED=0
 cd "$SCRIPT_DIR"
 exec ./train_S3DIS_litept.sh \
+  --batch_size 24 \
+  --accum_batch 1 \
   --layer_blocks 2 2 2 6 2 \
   --litept_light_decoder 1 \
   --decoder_layer 0 \

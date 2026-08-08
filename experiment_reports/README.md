@@ -9,6 +9,9 @@ and evaluation runs. Raw runtime output remains in
 | Dataset | Run | Main result | Status |
 |---|---|---|---|
 | S3DIS Area 5 | [KPConvX-L, seed 57106803](./s3dis/kpconvx-l-area5-seed57106803/) | final 10-vote full-cloud mIoU 71.4% | completed |
+| S3DIS Area 5 | [LitePT L0, seed 57106803](./s3dis/litept-l0-450-seed57106803/) | best tested 10-vote full-cloud mIoU 72.1% at epoch 210 | completed |
+| S3DIS Area 5 | [LitePT L0D, seed 57106803](./s3dis/litept-l0d-250-seed57106803/) | best tested 10-vote full-cloud mIoU 71.8% at epoch 150 | completed |
+| S3DIS Area 5 | [LitePT L1, seed 57106803](./s3dis/litept-l1-250-seed57106803/) | best tested 10-vote full-cloud mIoU 69.6% at checkpoint epoch 130 | completed |
 | ScanObjectNN main split | [four-model checkpoint study, seed 57106803](./scanobjectnn/full-checkpoint-study-seed57106803/) | best observed 10-vote OA 89.3% | completed |
 
 ## Storage policy
@@ -26,8 +29,9 @@ Each run directory must include:
 
 ## Downloadable CSV
 
-- [All current checkpoint tests](./all_test_results.csv): normalized table with
-  44 rows from S3DIS and ScanObjectNN.
+- [Existing normalized checkpoint tests](./all_test_results.csv): baseline S3DIS
+  and ScanObjectNN checkpoint table. The LitePT L0/L0D/L1 run-specific tables are
+  kept in their respective report directories above.
 - [Paper versus current summary](./paper_vs_current_summary.csv): headline values
   from arXiv:2405.13194 and current runs, with explicit comparability labels.
 

@@ -28,7 +28,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from utils.gpu_init import init_gpu
-from utils.training_schedule import periodic_checkpoint_due
+from utils.checkpoint_state import atomic_torch_save, capture_rng_state, restore_rng_state
+from utils.training_schedule import EpochMultiplicativeLRScheduler, periodic_checkpoint_due
 
 from tasks.training import training_epoch, training_epoch_debug
 from tasks.validation import validation_epoch
@@ -121,6 +122,10 @@ def train_and_validate(net, training_loader, val_loader, cfg, chkp_path=None, fi
     else:
         raise ValueError('Optimizer \"{:s}\" unknown. Only \"Adam\" and \"SGD\" are accepted.'.format(cfg.train.optimizer))
 
+    # Preserve the original epoch-wise multiplicative schedule while making
+    # its position explicit and checkpointable.
+    lr_scheduler = EpochMultiplicativeLRScheduler(optimizer, cfg.train.lr_decays)
+
 
     ##########################
     # Load previous checkpoint
@@ -152,14 +157,23 @@ def train_and_validate(net, training_loader, val_loader, cfg, chkp_path=None, fi
 
         else:
             # load everything otherwise
-            checkpoint = torch.load(chkp_path, map_location=device)
+            checkpoint = torch.load(chkp_path, map_location=device, weights_only=False)
             net.load_state_dict(checkpoint['model_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             epoch = checkpoint['epoch']
+            if 'lr_scheduler_state_dict' in checkpoint:
+                lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
+            else:
+                lr_scheduler.align_legacy_checkpoint(epoch)
+                print("Legacy checkpoint: learning-rate scheduler position reconstructed from epoch.")
             if 'train_batch_limit' in checkpoint:
                 training_loader.dataset.b_lim = checkpoint['train_batch_limit']
             if 'test_batch_limit' in checkpoint:
                 val_loader.dataset.b_lim = checkpoint['test_batch_limit']
+            if 'rng_state' in checkpoint:
+                restore_rng_state(checkpoint['rng_state'])
+            else:
+                print("Legacy checkpoint: exact RNG streams were not recorded.")
             net.train()
             print("Model and training state restored.")
 
@@ -227,31 +241,38 @@ def train_and_validate(net, training_loader, val_loader, cfg, chkp_path=None, fi
         if cfg.exp.saving and not exists(PID_file):
             break
 
-        # Update learning rate
-        if str(epoch) in cfg.train.lr_decays:
-            for param_group in optimizer.param_groups:
-                param_group['lr'] *= cfg.train.lr_decays[str(epoch)]
+        # Update learning rate using the same completed-epoch index as the
+        # original manual multiplication logic.
+        lr_scheduler.step(epoch)
 
         # Update epoch
         epoch += 1
 
-        # Saving
+        # Validation
+        net.eval()
+        with torch.no_grad():
+            validation_epoch(epoch, net, val_loader, cfg, val_data, device)
+        net.train()
+
+        # Save after validation so the RNG state is the true starting state of
+        # the next training epoch. An interrupted epoch can then be replayed
+        # from its boundary with the same process RNG streams.
         if cfg.exp.saving:
-            # Get current state dict
-            save_dict = {'epoch': epoch,
+            save_dict = {'checkpoint_format_version': 2,
+                         'epoch': epoch,
                          'model_state_dict': net.state_dict(),
                          'optimizer_state_dict': optimizer.state_dict(),
+                         'lr_scheduler_state_dict': lr_scheduler.state_dict(),
+                         'rng_state': capture_rng_state(),
                          'train_batch_limit': training_loader.dataset.b_lim,
                          'test_batch_limit': val_loader.dataset.b_lim,
                          'saving_path': cfg.exp.log_dir}
 
-            # Save current state of the network (for restoring purposes)
+            # Publish checkpoints atomically so interruption during torch.save
+            # cannot corrupt the last recoverable file.
             checkpoint_path = join(checkpoint_directory, 'current_chkp.tar')
-            torch.save(save_dict, checkpoint_path)
+            atomic_torch_save(save_dict, checkpoint_path)
 
-            # Keep the rolling checkpoint every epoch and retain periodic copies.
-            # A configured start epoch is useful for long S3DIS runs where only
-            # later checkpoints are needed for model selection and recovery.
             checkpoint_start = getattr(cfg.train, 'checkpoint_start', None)
             save_periodic = periodic_checkpoint_due(
                 epoch,
@@ -260,13 +281,7 @@ def train_and_validate(net, training_loader, val_loader, cfg, chkp_path=None, fi
             )
             if save_periodic:
                 checkpoint_path = join(checkpoint_directory, 'chkp_{:04d}.tar'.format(epoch))
-                torch.save(save_dict, checkpoint_path)
-
-        # Validation
-        net.eval()
-        with torch.no_grad():
-            validation_epoch(epoch, net, val_loader, cfg, val_data, device)
-        net.train()
+                atomic_torch_save(save_dict, checkpoint_path)
 
 
 
