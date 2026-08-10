@@ -173,6 +173,13 @@ def init_cfg():
     cfg.train = EasyDict()
     cfg.train.num_workers = 16          #   Int, number of parallel workers for input dataset
     cfg.train.checkpoint_gap = 50       #   Int, gap between each saved checkpoint
+    cfg.train.validation_mode = 'partial'       #   Str, 'partial' or deterministic 'full_identity'
+    cfg.train.save_best_val = True              #  Bool, keep the best validation checkpoint
+    cfg.train.save_latest_val = True            #  Bool, keep current_chkp.tar after validation
+    cfg.train.save_best_val_cycle = False       #  Bool, select best complete regular-validation cycle
+    cfg.train.save_fraction_checkpoints = True  #  Bool, keep the 1/5 through 4/5 milestones
+    cfg.train.save_periodic_checkpoints = False #  Bool, also use the legacy checkpoint_gap schedule
+    cfg.train.auto_test_vote10 = False           #  Bool, launch a supported 10-vote test after training
 
     cfg.train.max_epoch = 300           #   Int, number of training epochs
     cfg.train.steps_per_epoch = 1000    #   Int, number of steps per epoch

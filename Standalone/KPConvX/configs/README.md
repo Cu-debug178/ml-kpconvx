@@ -38,6 +38,22 @@ bash train_S3DIS.sh --config-file s3dis/fastadapter_bf16
 Specialized FastAdapter/LitePT launchers deliberately provide named preset
 arguments; those named arguments have higher priority than a config file.
 
+Validation and checkpoint controls are independent. `train.validation_mode` is
+`partial` by default; `full_identity` is an explicit full-room Identity
+protocol and is not selected by default. `save_latest_val` keeps the latest
+recoverable validation state, while `save_best_val` keeps a single-validation
+best when enabled. For S3DIS, `save_best_val_cycle` is enabled by default and
+selects `best_cycle_chkp.tar` only after every index in a complete regular
+validation vote has been observed. `save_fraction_checkpoints` keeps the 1/5
+through 4/5 milestones, and `save_periodic_checkpoints` enables legacy
+`checkpoint_gap` copies.
+
+A regular-validation cycle may span adjacent training epochs, so its samples
+can come from different network states. `best_cycle_chkp.tar` is the current
+network at the moment that selection heuristic completes. Final reported
+metrics must still come from a fixed checkpoint evaluated by the unchanged
+full Area 5 multi-vote test.
+
 For a one-off override, use Pointcept-style dotted options instead of creating
 another file:
 

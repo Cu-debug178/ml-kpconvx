@@ -339,6 +339,7 @@ if __name__ == '__main__':
     str_args = ['model.kp_mode',
                 'train.data_sampler',
                 'train.amp_dtype',
+                'train.validation_mode',
                 'model.kp_aggregation',
                 'model.kp_influence',
                 'model.norm',
@@ -387,6 +388,12 @@ if __name__ == '__main__':
                 'exp.seed']
 
     bool_args = ['train.amp_enabled',
+                 'train.save_best_val',
+                 'train.save_latest_val',
+                 'train.save_best_val_cycle',
+                 'train.save_fraction_checkpoints',
+                 'train.save_periodic_checkpoints',
+                 'train.auto_test_vote10',
                  'model.use_strided_conv',
                  'model.inv_grp_norm',
                  'model.kpx_upcut',

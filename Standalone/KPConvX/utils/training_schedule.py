@@ -145,6 +145,29 @@ def periodic_checkpoint_due(
     )
 
 
+def fraction_checkpoint_index(
+    completed_epoch: int,
+    max_epoch: int,
+    parts: int = 5,
+) -> int | None:
+    """Return the 1-based milestone index, excluding the final part.
+
+    For a 250-epoch run split into five parts, this selects epochs 50, 100,
+    150 and 200. The final epoch is represented by ``current_chkp.tar``.
+    """
+
+    completed_epoch = int(completed_epoch)
+    max_epoch = int(max_epoch)
+    parts = int(parts)
+    if max_epoch < 1 or parts < 2:
+        raise ValueError("max_epoch must be positive and parts must be at least two")
+    for index in range(1, parts):
+        target = int(math.ceil(max_epoch * index / parts))
+        if completed_epoch == target:
+            return index
+    return None
+
+
 def optimizer_step_monitor_due(
     enabled: bool,
     mini_step: int,

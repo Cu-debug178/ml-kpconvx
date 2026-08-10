@@ -12,6 +12,7 @@ if ROOT not in sys.path:
 
 from utils.training_schedule import (
     EpochMultiplicativeLRScheduler,
+    fraction_checkpoint_index,
     optimizer_step_monitor_due,
     periodic_checkpoint_due,
     rebuild_cyclic_lr,
@@ -64,6 +65,22 @@ class TrainingScheduleTests(unittest.TestCase):
             if periodic_checkpoint_due(epoch, 10, 200)
         ]
         self.assertEqual(due, [200, 210, 220, 230, 240, 250])
+
+    def test_five_part_checkpoints_exclude_the_final_epoch(self):
+        due = {
+            epoch: fraction_checkpoint_index(epoch, 250)
+            for epoch in range(1, 251)
+            if fraction_checkpoint_index(epoch, 250) is not None
+        }
+        self.assertEqual(due, {50: 1, 100: 2, 150: 3, 200: 4})
+
+    def test_fraction_checkpoints_handle_non_divisible_training_length(self):
+        due = {
+            epoch: fraction_checkpoint_index(epoch, 7)
+            for epoch in range(1, 8)
+            if fraction_checkpoint_index(epoch, 7) is not None
+        }
+        self.assertEqual(due, {2: 1, 3: 2, 5: 3, 6: 4})
 
     def test_monitor_uses_optimizer_steps_not_mini_batches(self):
         selected = [

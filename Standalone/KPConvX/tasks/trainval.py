@@ -18,6 +18,7 @@
 
 
 # Basic libs
+import os
 import time
 import torch
 from os import makedirs, remove
@@ -33,7 +34,11 @@ from utils.mixed_precision import (create_grad_scaler,
                                    mixed_precision_state_dict,
                                    resolve_mixed_precision,
                                    restore_mixed_precision_state)
-from utils.training_schedule import EpochMultiplicativeLRScheduler, periodic_checkpoint_due
+from utils.training_schedule import (
+    EpochMultiplicativeLRScheduler,
+    fraction_checkpoint_index,
+    periodic_checkpoint_due,
+)
 
 from tasks.training import training_epoch, training_epoch_debug
 from tasks.validation import validation_epoch
@@ -66,6 +71,13 @@ def train_and_validate(net, training_loader, val_loader, cfg, chkp_path=None, fi
     # Epochs and steps
     epoch = 0
     resuming = chkp_path is not None and not finetune
+    best_validation_metric = float('-inf')
+    best_validation_epoch = None
+    best_cycle_miou = float('-inf')
+    best_cycle_vote = None
+    best_cycle_start_epoch = None
+    best_cycle_end_epoch = None
+    best_cycle_ious = None
 
     # Choose to train on CPU or GPU
     if on_gpu and torch.cuda.is_available():
@@ -184,6 +196,18 @@ def train_and_validate(net, training_loader, val_loader, cfg, chkp_path=None, fi
                 training_loader.dataset.b_lim = checkpoint['train_batch_limit']
             if 'test_batch_limit' in checkpoint:
                 val_loader.dataset.b_lim = checkpoint['test_batch_limit']
+            saved_reg_vote = checkpoint.get('validation_reg_vote')
+            if (
+                getattr(cfg.train, 'save_best_val_cycle', False)
+                and hasattr(val_loader.dataset, 'reg_votes')
+            ):
+                # Incomplete cycle accumulators are intentionally not restored.
+                # Start a fresh queue with a new vote id instead of mixing runs.
+                if saved_reg_vote is None:
+                    saved_reg_vote = checkpoint.get('best_cycle_vote')
+                if saved_reg_vote is not None:
+                    val_loader.dataset.reg_sampling_i.zero_()
+                    val_loader.dataset.reg_votes.fill_(int(saved_reg_vote) + 1)
             if 'rng_state' in checkpoint:
                 restore_rng_state(checkpoint['rng_state'])
             else:
@@ -193,6 +217,36 @@ def train_and_validate(net, training_loader, val_loader, cfg, chkp_path=None, fi
                 amp_settings,
                 grad_scaler,
             )
+            saved_best_metric = checkpoint.get('best_validation_metric')
+            if saved_best_metric is not None:
+                best_validation_metric = float(saved_best_metric)
+                best_validation_epoch = checkpoint.get('best_validation_epoch')
+            else:
+                print('Legacy checkpoint: historical best validation metric was not recorded.')
+            saved_cycle_miou = checkpoint.get('best_cycle_miou')
+            if saved_cycle_miou is not None:
+                best_cycle_miou = float(saved_cycle_miou)
+                best_cycle_vote = checkpoint.get('best_cycle_vote')
+                best_cycle_start_epoch = checkpoint.get('best_cycle_start_epoch')
+                best_cycle_end_epoch = checkpoint.get('best_cycle_end_epoch')
+                best_cycle_ious = checkpoint.get('best_cycle_ious')
+            elif getattr(cfg.train, 'save_best_val_cycle', False):
+                # Covers interruption between publishing best_cycle and current.
+                best_cycle_path = join(
+                    os.path.dirname(chkp_path), 'best_cycle_chkp.tar'
+                )
+                if exists(best_cycle_path) and os.path.realpath(best_cycle_path) != os.path.realpath(chkp_path):
+                    best_cycle_state = torch.load(
+                        best_cycle_path, map_location='cpu', weights_only=False
+                    )
+                    fallback_miou = best_cycle_state.get('best_cycle_miou')
+                    if fallback_miou is not None:
+                        best_cycle_miou = float(fallback_miou)
+                        best_cycle_vote = best_cycle_state.get('best_cycle_vote')
+                        best_cycle_start_epoch = best_cycle_state.get('best_cycle_start_epoch')
+                        best_cycle_end_epoch = best_cycle_state.get('best_cycle_end_epoch')
+                        best_cycle_ious = best_cycle_state.get('best_cycle_ious')
+                        print('Historical best validation cycle restored from best_cycle_chkp.tar.')
             net.train()
             print("Model and training state restored.")
 
@@ -281,7 +335,7 @@ def train_and_validate(net, training_loader, val_loader, cfg, chkp_path=None, fi
         # Validation
         net.eval()
         with torch.no_grad():
-            validation_epoch(
+            val_result = validation_epoch(
                 epoch,
                 net,
                 val_loader,
@@ -292,11 +346,54 @@ def train_and_validate(net, training_loader, val_loader, cfg, chkp_path=None, fi
             )
         net.train()
 
+        if isinstance(val_result, dict):
+            validation_metric = val_result.get('metric')
+            completed_cycles = val_result.get('completed_cycles', [])
+        else:
+            # Keep compatibility with custom validation functions returning a scalar.
+            validation_metric = val_result
+            completed_cycles = []
+
+        validation_metric = (
+            None if validation_metric is None else float(validation_metric)
+        )
+        is_best_validation = bool(
+            validation_metric is not None
+            and np.isfinite(validation_metric)
+            and validation_metric > best_validation_metric
+        )
+        if is_best_validation:
+            best_validation_metric = validation_metric
+            best_validation_epoch = epoch
+
+        best_cycle_updated = False
+        for cycle in completed_cycles:
+            cycle_miou = float(cycle['miou'])
+            if np.isfinite(cycle_miou) and cycle_miou > best_cycle_miou:
+                previous_cycle_best = best_cycle_miou
+                best_cycle_miou = cycle_miou
+                best_cycle_vote = int(cycle['vote_id'])
+                best_cycle_start_epoch = int(cycle['start_epoch'])
+                best_cycle_end_epoch = int(cycle['end_epoch'])
+                best_cycle_ious = list(cycle['ious'])
+                best_cycle_updated = True
+                print(
+                    '[ValCycle] NEW BEST: {:.3f} > {:.3f}'.format(
+                        cycle_miou, previous_cycle_best
+                    )
+                )
+            elif np.isfinite(cycle_miou):
+                print(
+                    '[ValCycle] {:.3f} <= best {:.3f}'.format(
+                        cycle_miou, best_cycle_miou
+                    )
+                )
+
         # Save after validation so the RNG state is the true starting state of
         # the next training epoch. An interrupted epoch can then be replayed
         # from its boundary with the same process RNG streams.
         if cfg.exp.saving:
-            save_dict = {'checkpoint_format_version': 3,
+            save_dict = {'checkpoint_format_version': 4,
                          'epoch': epoch,
                          'model_state_dict': net.state_dict(),
                          'optimizer_state_dict': optimizer.state_dict(),
@@ -308,18 +405,62 @@ def train_and_validate(net, training_loader, val_loader, cfg, chkp_path=None, fi
                          'rng_state': capture_rng_state(),
                          'train_batch_limit': training_loader.dataset.b_lim,
                          'test_batch_limit': val_loader.dataset.b_lim,
+                         'validation_metric': validation_metric,
+                         'best_validation_metric': (
+                             None if not np.isfinite(best_validation_metric)
+                             else best_validation_metric
+                         ),
+                         'best_validation_epoch': best_validation_epoch,
+                         'validation_mode': getattr(cfg.train, 'validation_mode', 'partial'),
+                         'validation_reg_vote': (
+                             int(val_loader.dataset.reg_votes.item())
+                             if hasattr(val_loader.dataset, 'reg_votes') else None
+                         ),
+                         'best_cycle_miou': (
+                             None if not np.isfinite(best_cycle_miou) else best_cycle_miou
+                         ),
+                         'best_cycle_vote': best_cycle_vote,
+                         'best_cycle_start_epoch': best_cycle_start_epoch,
+                         'best_cycle_end_epoch': best_cycle_end_epoch,
+                         'best_cycle_ious': best_cycle_ious,
                          'saving_path': cfg.exp.log_dir}
 
-            # Publish checkpoints atomically so interruption during torch.save
-            # cannot corrupt the last recoverable file.
-            checkpoint_path = join(checkpoint_directory, 'current_chkp.tar')
-            atomic_torch_save(save_dict, checkpoint_path)
+            # Each checkpoint family is controlled independently.
+            if getattr(cfg.train, 'save_best_val', True) and is_best_validation:
+                checkpoint_path = join(checkpoint_directory, 'best_val_chkp.tar')
+                atomic_torch_save(save_dict, checkpoint_path)
+
+            if getattr(cfg.train, 'save_best_val_cycle', False) and best_cycle_updated:
+                # A cycle may span several epochs. This is the current model at
+                # cycle completion, not a claim that one fixed weight produced
+                # every prediction accumulated in the cycle metric.
+                checkpoint_path = join(checkpoint_directory, 'best_cycle_chkp.tar')
+                atomic_torch_save(save_dict, checkpoint_path)
+                print('[ValCycle] saved {:s}'.format(checkpoint_path))
+
+            if getattr(cfg.train, 'save_latest_val', True):
+                checkpoint_path = join(checkpoint_directory, 'current_chkp.tar')
+                atomic_torch_save(save_dict, checkpoint_path)
+
+            fraction_index = fraction_checkpoint_index(epoch, cfg.train.max_epoch)
+            if (
+                getattr(cfg.train, 'save_fraction_checkpoints', True)
+                and fraction_index is not None
+            ):
+                checkpoint_path = join(
+                    checkpoint_directory,
+                    'chkp_{:d}of5.tar'.format(fraction_index),
+                )
+                atomic_torch_save(save_dict, checkpoint_path)
 
             checkpoint_start = getattr(cfg.train, 'checkpoint_start', None)
-            save_periodic = periodic_checkpoint_due(
-                epoch,
-                cfg.train.checkpoint_gap,
-                checkpoint_start,
+            save_periodic = bool(
+                getattr(cfg.train, 'save_periodic_checkpoints', False)
+                and periodic_checkpoint_due(
+                    epoch,
+                    cfg.train.checkpoint_gap,
+                    checkpoint_start,
+                )
             )
             if save_periodic:
                 checkpoint_path = join(checkpoint_directory, 'chkp_{:04d}.tar'.format(epoch))
@@ -329,11 +470,45 @@ def train_and_validate(net, training_loader, val_loader, cfg, chkp_path=None, fi
 
 
     # Remove the temporary file used for kill signal
-    if exists(PID_file):
+    if PID_file is not None and exists(PID_file):
         remove(PID_file)
 
-    print('Finished Training')
-    return
+    training_completed = epoch >= cfg.train.max_epoch
+    print('Finished Training' if training_completed else 'Training stopped before completion')
+
+    best_checkpoint = None
+    latest_checkpoint = None
+    best_cycle_checkpoint = None
+    if checkpoint_directory is not None:
+        candidate = join(checkpoint_directory, 'best_val_chkp.tar')
+        if exists(candidate):
+            best_checkpoint = candidate
+        candidate = join(checkpoint_directory, 'current_chkp.tar')
+        if exists(candidate):
+            latest_checkpoint = candidate
+        candidate = join(checkpoint_directory, 'best_cycle_chkp.tar')
+        if exists(candidate):
+            best_cycle_checkpoint = candidate
+
+    return EasyDict(
+        completed=training_completed,
+        completed_epoch=epoch,
+        best_metric=(
+            None if not np.isfinite(best_validation_metric)
+            else best_validation_metric
+        ),
+        best_epoch=best_validation_epoch,
+        best_checkpoint=best_checkpoint,
+        latest_checkpoint=latest_checkpoint,
+        best_cycle_miou=(
+            None if not np.isfinite(best_cycle_miou) else best_cycle_miou
+        ),
+        best_cycle_vote=best_cycle_vote,
+        best_cycle_start_epoch=best_cycle_start_epoch,
+        best_cycle_end_epoch=best_cycle_end_epoch,
+        best_cycle_ious=best_cycle_ious,
+        best_cycle_checkpoint=best_cycle_checkpoint,
+    )
 
 
 # ----------------------------------------------------------------------------------------------------------------------

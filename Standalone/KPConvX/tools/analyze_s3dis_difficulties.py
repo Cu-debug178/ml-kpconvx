@@ -1108,7 +1108,7 @@ def run_infer(args: argparse.Namespace) -> None:
         # Process every regular centre exactly once.  The generic validation
         # sampler intentionally uses only a fraction per epoch for training-time
         # validation, which is not sufficient for a diagnostic export.
-        sampler.N = int(dataset.reg_sample_pts.shape[0])
+        sampler.N = dataset.get_reg_sampling_size()
         loader = DataLoader(
             dataset,
             batch_size=1,

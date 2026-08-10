@@ -26,6 +26,7 @@ import time
 import signal
 import argparse
 import random
+import gc
 import numpy as np
 
 # Set before importing torch so the CUDA allocator uses expandable segments.
@@ -67,6 +68,7 @@ from data_handlers.scene_seg import SceneSegSampler, SceneSegCollate
 from experiments.S3DIS.S3DIS_rooms import S3DIR_cfg, S3DIRDataset
 
 from tasks.trainval import train_and_validate
+from tasks.validation import get_validation_mode
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -207,6 +209,10 @@ def my_config():
     cfg.train.max_epoch = 450  # 100
     cfg.train.checkpoint_start = 150
     cfg.train.checkpoint_gap = 10
+    cfg.train.validation_mode = 'partial'
+    cfg.train.save_best_val = False
+    cfg.train.save_best_val_cycle = True
+    cfg.train.auto_test_vote10 = True
     
     # Deformations
     cfg.train.deform_loss_factor = 0.1      # Reduce to reduce influence for deformation on overall features
@@ -342,6 +348,33 @@ def adjust_config(cfg):
     return cfg
 
 
+def configure_validation_mode(cfg):
+    """Apply the deterministic full-room validation protocol when requested."""
+
+    mode = get_validation_mode(cfg)
+    if mode != 'full_identity':
+        return cfg
+
+    # Identity validation uses every regular room center exactly once per epoch.
+    cfg.test.data_sampler = 'regular'
+    cfg.test.in_radius = 100.0
+    cfg.test.batch_limit = 1
+    cfg.test.batch_size = 1
+    cfg.test.max_steps_per_epoch = 9999999
+    cfg.test.val_momentum = 0.0
+
+    cfg.augment_test.anisotropic = False
+    cfg.augment_test.scale = [1.0, 1.0]
+    cfg.augment_test.flips = [0.0, 0.0, 0.0]
+    cfg.augment_test.rotations = 'none'
+    cfg.augment_test.jitter = 0.0
+    cfg.augment_test.color_drop = 0.0
+    cfg.augment_test.chromatic_contrast = False
+    cfg.augment_test.chromatic_all = False
+    cfg.augment_test.pts_drop_p = -1.0
+    return cfg
+
+
 # ----------------------------------------------------------------------------------------------------------------------
 #
 #           Main Call
@@ -359,6 +392,7 @@ if __name__ == '__main__':
     str_args = ['model.kp_mode',
                 'train.data_sampler',
                 'train.amp_dtype',
+                'train.validation_mode',
                 'model.kp_aggregation',
                 'model.kp_influence',
                 'model.norm',
@@ -410,6 +444,12 @@ if __name__ == '__main__':
 
     bool_args = ['train.monitor_enabled',
                  'train.amp_enabled',
+                 'train.save_best_val',
+                 'train.save_latest_val',
+                 'train.save_best_val_cycle',
+                 'train.save_fraction_checkpoints',
+                 'train.save_periodic_checkpoints',
+                 'train.auto_test_vote10',
                  'model.use_strided_conv',
                  'model.inv_grp_norm',
                  'model.kpx_upcut',
@@ -562,6 +602,7 @@ if __name__ == '__main__':
 
     # Adjust config after parameters have been changed
     cfg = adjust_config(cfg)
+    cfg = configure_validation_mode(cfg)
 
     # Claim the GPU only after all configuration inputs have been validated.
     device = init_gpu()
@@ -600,6 +641,9 @@ if __name__ == '__main__':
     # Initialize samplers
     training_sampler = SceneSegSampler(training_dataset)
     test_sampler = SceneSegSampler(test_dataset)
+    if cfg.train.validation_mode == 'full_identity':
+        # Override the legacy partial-validation cap (34%-67% of the rooms).
+        test_sampler.N = test_dataset.get_reg_sampling_size()
 
     # Initialize the dataloader
     training_loader = DataLoader(training_dataset,
@@ -669,7 +713,41 @@ if __name__ == '__main__':
     print('\n')
     frame_lines_1(['Training and Validation'])
     checkpoint_path = resume_path if resume_path is not None else finetune_path
-    train_and_validate(net, training_loader, test_loader, cfg,
-                       chkp_path=checkpoint_path,
-                       finetune=finetune_path is not None,
-                       on_gpu=True)
+    train_summary = train_and_validate(
+        net,
+        training_loader,
+        test_loader,
+        cfg,
+        chkp_path=checkpoint_path,
+        finetune=finetune_path is not None,
+        on_gpu=True,
+    )
+
+    # Launch the existing standard 10-vote evaluation only after all epochs finish.
+    if cfg.train.auto_test_vote10 and train_summary.completed:
+        chosen_weight = None
+        if cfg.train.save_best_val_cycle:
+            chosen_weight = train_summary.best_cycle_checkpoint
+        if chosen_weight is None and cfg.train.save_best_val:
+            chosen_weight = train_summary.best_checkpoint
+        if chosen_weight is None and cfg.train.save_latest_val:
+            chosen_weight = train_summary.latest_checkpoint
+        if chosen_weight is None:
+            raise RuntimeError(
+                'auto_test_vote10 requires a selected best-cycle, best-validation, '
+                'or latest checkpoint; enable one of the corresponding save switches'
+            )
+
+        del a, training_loader, test_loader, training_dataset, test_dataset, net
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        from experiments.S3DIS.test_S3DIS import configure_vote_test, test_S3DIS_log
+
+        configure_vote_test(cfg, votes=10)
+        test_S3DIS_log(
+            cfg.exp.log_dir,
+            cfg,
+            weight_path=chosen_weight,
+        )

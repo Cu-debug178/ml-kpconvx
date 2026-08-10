@@ -50,6 +50,31 @@ from experiments.S3DIS.S3DIS_rooms import S3DIR_cfg, S3DIRDataset
 from tasks.test import test_model
 
 
+def configure_vote_test(cfg, votes=10):
+    """Apply the repository's existing full-room random-vote S3DIS protocol."""
+
+    votes = int(votes)
+    if votes < 1:
+        raise ValueError('votes must be positive')
+
+    cfg.test.batch_limit = 1
+    cfg.test.in_radius = 100.0
+    cfg.test.max_steps_per_epoch = 9999999
+    cfg.test.max_votes = votes
+    cfg.test.fixed_sampling = False
+
+    cfg.augment_test.anisotropic = False
+    cfg.augment_test.scale = [0.99, 1.01]
+    cfg.augment_test.flips = [0.5, 0, 0]
+    cfg.augment_test.rotations = 'vertical'
+    cfg.augment_test.jitter = 0
+    cfg.augment_test.color_drop = 0.0
+    cfg.augment_test.chromatic_contrast = False
+    cfg.augment_test.chromatic_all = False
+    cfg.augment_test.pts_drop_p = -1.0
+    return cfg
+
+
 def profile_S3DIS(net, test_loader, cfg, on_gpu=True, get_flops=False, test_path=""):
 
     ############
@@ -424,32 +449,11 @@ if __name__ == '__main__':
     
     # Optionally you can change some parameters from the config file. For example:
         
-    # Ensure we only have one point cloud in each batch for test
-    new_cfg.test.batch_limit = 1
-
-    # Test whole rooms
-    new_cfg.test.in_radius = 100.0
-
-    # Only stop one test epoch when all rooms have been tested
-    new_cfg.test.max_steps_per_epoch = 9999999
-
-    # Test 10 times
-    new_cfg.test.max_votes = 10
-
-    # Augmentations
-    new_cfg.augment_test.anisotropic = False
-    new_cfg.augment_test.scale = [0.99, 1.01]
-    new_cfg.augment_test.flips = [0.5, 0, 0]
-    new_cfg.augment_test.rotations = 'vertical'
-    new_cfg.augment_test.jitter = 0
-    new_cfg.augment_test.color_drop = 0.0
-    new_cfg.augment_test.chromatic_contrast = False
-    new_cfg.augment_test.chromatic_all = False
+    configure_vote_test(new_cfg, votes=10)
 
 
     test_S3DIS_log(log_dir, new_cfg, weight_path=weights, profile=args.profile)
     
-
 
 
 

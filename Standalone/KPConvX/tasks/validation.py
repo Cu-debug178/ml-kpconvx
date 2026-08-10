@@ -32,6 +32,51 @@ from utils.mixed_precision import autocast_context
 
 from utils.printing import underline
 
+
+VALIDATION_MODES = ('partial', 'full_identity')
+
+
+def get_validation_mode(cfg):
+    """Validate and return the configured validation protocol."""
+
+    mode = str(getattr(cfg.train, 'validation_mode', 'partial')).strip().lower()
+    if mode not in VALIDATION_MODES:
+        raise ValueError(
+            "train.validation_mode must be one of {}; got {!r}".format(
+                VALIDATION_MODES, mode
+            )
+        )
+    if mode == 'full_identity' and cfg.data.task != 'cloud_segmentation':
+        raise ValueError(
+            "train.validation_mode='full_identity' is only supported for cloud segmentation"
+        )
+    return mode
+
+
+def full_cloud_segmentation_confusion(dataset, cloud_probs):
+    """Project subsampled predictions to the original clouds and aggregate confusion."""
+
+    full_labels = dataset.val_labels
+    if len(full_labels) == 0:
+        full_labels = dataset.input_labels
+    if len(cloud_probs) != len(full_labels):
+        raise ValueError('Validation probabilities and full-cloud labels have different lengths')
+
+    pred_values = np.asarray(dataset.pred_values, dtype=np.int32)
+    confusion = np.zeros((len(pred_values), len(pred_values)), dtype=np.int64)
+    has_projections = len(dataset.test_proj) == len(cloud_probs) and len(dataset.test_proj) > 0
+    for cloud_i, (sub_probs, labels) in enumerate(zip(cloud_probs, full_labels)):
+        sub_preds = dataset.probs_to_preds(sub_probs)
+        labels = np.asarray(labels, dtype=np.int32)
+        if has_projections:
+            preds = sub_preds[dataset.test_proj[cloud_i]].astype(np.int32)
+        elif sub_preds.shape[0] == labels.shape[0]:
+            preds = sub_preds.astype(np.int32)
+        else:
+            raise ValueError('Full-cloud validation requires test_proj reprojection indices')
+        confusion += fast_confusion(labels, preds, pred_values).astype(np.int64)
+    return confusion
+
 # ----------------------------------------------------------------------------------------------------------------------
 #
 #           Validation Choice
@@ -41,32 +86,42 @@ from utils.printing import underline
 
 def validation_epoch(epoch, net, val_loader, cfg, val_data, device, amp_settings):
 
+    validation_mode = get_validation_mode(cfg)
+    if validation_mode == 'full_identity':
+        # Each epoch is an independent deterministic single-view evaluation.
+        if getattr(cfg.train, 'save_best_val_cycle', False) and 'cycle_states' in val_data:
+            val_loader.dataset.reg_votes += 1
+        val_data.clear()
+        val_loader.dataset.reg_sampling_i.zero_()
+
     if cfg.data.task == 'classification':
-        object_classification_validation(
+        metric = object_classification_validation(
             epoch, net, val_loader, cfg, val_data, device, amp_settings
         )
+        return {'metric': metric, 'completed_cycles': []}
 
     elif cfg.data.task == 'part_segmentation':
-        object_segmentation_validation(epoch, net, val_loader, cfg, val_data, device)
+        metric = object_segmentation_validation(epoch, net, val_loader, cfg, val_data, device)
+        return {'metric': metric, 'completed_cycles': []}
 
     elif cfg.data.task == 'multi_part_segmentation':
-        object_segmentation_validation(epoch, net, val_loader, cfg, val_data, device)
+        metric = object_segmentation_validation(epoch, net, val_loader, cfg, val_data, device)
+        return {'metric': metric, 'completed_cycles': []}
 
     elif cfg.data.task == 'cloud_segmentation':
-        cloud_segmentation_validation(
+        return cloud_segmentation_validation(
             epoch, net, val_loader, cfg, val_data, device, amp_settings
         )
 
     elif cfg.data.task == 'slam_segmentation':
-        slam_segmentation_validation(epoch, net, val_loader, cfg, val_data, device)
+        metric = slam_segmentation_validation(epoch, net, val_loader, cfg, val_data, device)
+        return {'metric': metric, 'completed_cycles': []}
 
     elif cfg.data.task == 'normals_regression':
-        regression_validation(epoch, net, val_loader, cfg, val_data, device)
+        metric = regression_validation(epoch, net, val_loader, cfg, val_data, device)
+        return {'metric': metric, 'completed_cycles': []}
     else:
         raise ValueError('No validation method implemented for this network type')
-
-    return
-
 
 # ----------------------------------------------------------------------------------------------------------------------
 #
@@ -125,6 +180,15 @@ def cloud_segmentation_validation(
                                                   for val_lbls in val_loader.dataset.val_labels])
                 i += 1
 
+    cycle_enabled = bool(getattr(cfg.train, 'save_best_val_cycle', False))
+    cycle_enabled = cycle_enabled and val_loader.dataset.data_sampler == 'regular'
+    completed_cycles = []
+    if cycle_enabled:
+        if 'cycle_states' not in val_data:
+            val_data.cycle_states = {}
+        if 'completed_cycle_ids' not in val_data:
+            val_data.completed_cycle_ids = set()
+
     #####################
     # Network predictions
     #####################
@@ -178,6 +242,14 @@ def cloud_segmentation_validation(
         in_inds = batch.in_dict.input_inds.cpu().numpy()
         in_invs = batch.in_dict.input_invs.cpu().numpy()
         cloud_inds = batch.in_dict.cloud_inds.cpu().numpy()
+        if cycle_enabled and hasattr(batch.in_dict, 'reg_vote_ids'):
+            reg_vote_ids = batch.in_dict.reg_vote_ids.cpu().numpy()
+            reg_sampling_inds = batch.in_dict.reg_sampling_inds.cpu().numpy()
+            reg_sampling_sizes = batch.in_dict.reg_sampling_sizes.cpu().numpy()
+        else:
+            reg_vote_ids = np.full((len(lengths),), -1, dtype=np.int64)
+            reg_sampling_inds = np.full((len(lengths),), -1, dtype=np.int64)
+            reg_sampling_sizes = np.full((len(lengths),), -1, dtype=np.int64)
 
         # Get predictions and labels per instance
         # ***************************************
@@ -203,6 +275,24 @@ def cloud_segmentation_validation(
             # Stack all prediction for this epoch
             predictions.append(probs[invs])
             targets.append(target[invs])
+            if cycle_enabled:
+                sample_conf = fast_confusion(
+                    target[invs],
+                    val_loader.dataset.probs_to_preds(probs[invs]),
+                    val_loader.dataset.pred_values,
+                ).astype(np.int64)
+                _record_validation_cycle_sample(
+                    (
+                        reg_vote_ids[b_i],
+                        reg_sampling_inds[b_i],
+                        reg_sampling_sizes[b_i],
+                        sample_conf,
+                    ),
+                    val_data,
+                    val_loader.dataset,
+                    epoch,
+                    completed_cycles,
+                )
             i0 += length
             j0 += length0
 
@@ -246,22 +336,29 @@ def cloud_segmentation_validation(
 
     t2 = time.time()
 
-    # Confusions for our subparts of validation set
-    Confs = np.zeros((len(predictions), nc_model, nc_model), dtype=np.int32)
-    for i, (probs, truth) in enumerate(zip(predictions, targets)):
-        preds = val_loader.dataset.probs_to_preds(probs)
-        Confs[i, :, :] = fast_confusion(truth, preds, val_loader.dataset.pred_values).astype(np.int32)
+    if get_validation_mode(cfg) == 'full_identity':
+        # Select checkpoints with the metric reported on the original room points.
+        sum_Confs = full_cloud_segmentation_confusion(val_loader.dataset, val_data.probs)
+        t3 = time.time()
+        t4 = t3
+    else:
+        # Keep the legacy partial-validation metric exactly as before.
+        Confs = np.zeros((len(predictions), nc_model, nc_model), dtype=np.int32)
+        for i, (probs, truth) in enumerate(zip(predictions, targets)):
+            preds = val_loader.dataset.probs_to_preds(probs)
+            Confs[i, :, :] = fast_confusion(
+                truth, preds, val_loader.dataset.pred_values
+            ).astype(np.int32)
 
+        t3 = time.time()
 
-    t3 = time.time()
+        # Balance sampled fragments with the full validation class proportions.
+        sum_Confs = np.sum(Confs, axis=0).astype(np.float32)
+        sum_Confs *= np.expand_dims(
+            val_data.proportions / (np.sum(sum_Confs, axis=1) + 1e-6), 1
+        )
 
-    # Sum all confusions
-    sum_Confs = np.sum(Confs, axis=0).astype(np.float32)
-
-    # Balance with real validation proportions
-    sum_Confs *= np.expand_dims(val_data.proportions / (np.sum(sum_Confs, axis=1) + 1e-6), 1)
-
-    t4 = time.time()
+        t4 = time.time()
 
     # Objects IoU
     IoUs = IoU_from_confusions(sum_Confs)
@@ -393,7 +490,118 @@ def cloud_segmentation_validation(
         print('Save2 ..... {:.1f}s'.format(t7 - t6))
         print('\n************************\n')
 
-    return
+    if cfg.exp.saving and completed_cycles:
+        cycle_file = join(cfg.exp.log_dir, 'val_cycle_IoUs.txt')
+        with open(cycle_file, 'a') as text_file:
+            for cycle in completed_cycles:
+                line = '{:d} {:d} {:d} {:.6f}'.format(
+                    cycle['vote_id'],
+                    cycle['start_epoch'],
+                    cycle['end_epoch'],
+                    cycle['miou'],
+                )
+                line += ''.join(' {:.6f}'.format(value) for value in cycle['ious'])
+                text_file.write(line + '\n')
+
+    return {'metric': float(mIoU), 'completed_cycles': completed_cycles}
+
+
+def _record_validation_cycle_sample(
+    sample,
+    val_data,
+    dataset,
+    epoch,
+    completed_cycles,
+):
+    """Add one regular sample to its vote accumulator and finalize complete votes."""
+
+    vote_id, sampling_index, sampling_size, sample_conf = sample
+    vote_id = int(vote_id)
+    sampling_index = int(sampling_index)
+    sampling_size = int(sampling_size)
+    if vote_id < 0 or sampling_index < 0 or sampling_size < 1:
+        return
+
+    cycle_key = str(vote_id)
+    if vote_id in val_data.completed_cycle_ids:
+        print('[ValCycle] duplicate completed vote={}, skipping'.format(vote_id))
+        return
+
+    states = val_data.cycle_states
+    state = states.get(cycle_key)
+    if state is None:
+        state = {
+            'confusion': np.zeros_like(sample_conf, dtype=np.int64),
+            'seen_indices': set(),
+            'expected_size': sampling_size,
+            'start_epoch': int(epoch),
+        }
+        states[cycle_key] = state
+    elif state['expected_size'] != sampling_size:
+        raise ValueError(
+            'regular validation vote {} changed size from {} to {}'.format(
+                vote_id, state['expected_size'], sampling_size
+            )
+        )
+
+    if sampling_index >= state['expected_size']:
+        raise ValueError(
+            'regular validation vote {} has out-of-range index {} (size {})'.format(
+                vote_id, sampling_index, state['expected_size']
+            )
+        )
+    if sampling_index in state['seen_indices']:
+        print(
+            '[ValCycle] duplicate vote={} index={}, skipping'.format(
+                vote_id, sampling_index
+            )
+        )
+        return
+
+    state['seen_indices'].add(sampling_index)
+    state['confusion'] += sample_conf
+    print(
+        '[ValCycle] vote={} progress={}/{} epoch={}'.format(
+            vote_id,
+            len(state['seen_indices']),
+            state['expected_size'],
+            epoch,
+        )
+    )
+
+    if len(state['seen_indices']) != state['expected_size']:
+        return
+
+    raw_cycle_conf = state['confusion'].copy()
+    balanced_cycle_conf = raw_cycle_conf.astype(np.float64)
+    proportions = np.asarray(val_data.proportions, dtype=np.float64)
+    balanced_cycle_conf *= np.expand_dims(
+        proportions / (np.sum(balanced_cycle_conf, axis=1) + 1e-6), 1
+    )
+    cycle_ious = IoU_from_confusions(balanced_cycle_conf)
+    cycle_miou = float(100 * np.mean(cycle_ious))
+    cycle_result = {
+        'vote_id': vote_id,
+        'miou': cycle_miou,
+        'ious': (100 * np.asarray(cycle_ious)).tolist(),
+        'start_epoch': int(state['start_epoch']),
+        'end_epoch': int(epoch),
+        'sample_count': len(state['seen_indices']),
+        'raw_confusion': raw_cycle_conf,
+    }
+    val_data.completed_cycle_ids.add(vote_id)
+    completed_cycles.append(cycle_result)
+    del states[cycle_key]
+    print(
+        '[ValCycle] completed vote={} epochs={}-{} samples={}/{} mIoU={:.3f}'.format(
+            cycle_result['vote_id'],
+            cycle_result['start_epoch'],
+            cycle_result['end_epoch'],
+            cycle_result['sample_count'],
+            state['expected_size'],
+            cycle_miou,
+        )
+    )
 
 
 def object_classification_validation(
@@ -577,7 +785,7 @@ def object_classification_validation(
     vote_ACC = 100 * np.sum(np.diag(C2)) / (np.sum(C2) + 1e-6)
     print('Accuracies : val = {:.1f}% / vote = {:.1f}%'.format(val_ACC, vote_ACC))
 
-    return
+    return float(vote_ACC)
 
 
 def object_segmentation_validation(epoch, net, val_loader, cfg, val_data, device, debug=False):
@@ -590,13 +798,6 @@ def slam_segmentation_validation(epoch, net, val_loader, cfg, val_data, device, 
 
 def regression_validation(epoch, net, val_loader, cfg, val_data, device, debug=False):
     return
-
-
-
-
-
-
-
 
 
 

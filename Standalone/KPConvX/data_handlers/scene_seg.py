@@ -142,9 +142,16 @@ class SceneSegDataset(Dataset):
         self.reg_sampling_i.share_memory_()
         self.reg_votes = torch.from_numpy(np.zeros((1,), dtype=np.int64))
         self.reg_votes.share_memory_()
+        self.reg_sampling_size = torch.from_numpy(np.zeros((1,), dtype=np.int64))
+        self.reg_sampling_size.share_memory_()
 
         self.reg_sample_pts = None
         self.reg_sample_clouds = None
+        self.reg_sampling_capacity = 0
+        self.shared_reg_queue = bool(
+            self.set == 'validation'
+            and getattr(cfg.train, 'save_best_val_cycle', False)
+        )
 
         # Get augmentation transform
         if self.set == 'training':
@@ -479,49 +486,105 @@ class SceneSegDataset(Dataset):
         all_reg_clouds = torch.concat(all_reg_clouds, dim=0)
         rand_shuffle = torch.randperm(all_reg_clouds.shape[0])
 
-        # Put in queue. Memory is shared automatically
-        self.reg_sample_pts = all_reg_pts[rand_shuffle]
-        self.reg_sample_clouds = all_reg_clouds[rand_shuffle]
+        shuffled_pts = all_reg_pts[rand_shuffle]
+        shuffled_clouds = all_reg_clouds[rand_shuffle]
 
-        # Share memory
-        self.reg_sample_pts.share_memory_()
-        self.reg_sample_clouds.share_memory_()
+        if self.shared_reg_queue:
+            # Validation workers share object storage but not Python attribute
+            # rebinding. Update a shared buffer in place so every worker sees
+            # the same regenerated queue and queue size.
+            queue_size = int(shuffled_pts.shape[0])
+            if self.reg_sample_pts is None:
+                self.reg_sampling_capacity = max(queue_size * 2, queue_size + 1024)
+                self.reg_sample_pts = torch.empty(
+                    (self.reg_sampling_capacity, shuffled_pts.shape[1]),
+                    dtype=shuffled_pts.dtype,
+                )
+                self.reg_sample_clouds = torch.empty(
+                    (self.reg_sampling_capacity,), dtype=shuffled_clouds.dtype
+                )
+                self.reg_sample_pts.share_memory_()
+                self.reg_sample_clouds.share_memory_()
+            elif queue_size > self.reg_sampling_capacity:
+                raise RuntimeError(
+                    'regular validation queue exceeds shared capacity: {} > {}'.format(
+                        queue_size, self.reg_sampling_capacity
+                    )
+                )
+            self.reg_sample_pts[:queue_size].copy_(shuffled_pts)
+            self.reg_sample_clouds[:queue_size].copy_(shuffled_clouds)
+            self.reg_sampling_size.fill_(queue_size)
+        else:
+            # Preserve the original queue behavior outside cycle validation.
+            self.reg_sample_pts = shuffled_pts
+            self.reg_sample_clouds = shuffled_clouds
+            self.reg_sample_pts.share_memory_()
+            self.reg_sample_clouds.share_memory_()
+            self.reg_sampling_size.fill_(int(shuffled_pts.shape[0]))
 
         return
+
+    def get_reg_sampling_size(self):
+        """Return the active queue length, excluding spare shared capacity."""
+
+        if hasattr(self, 'reg_sampling_size'):
+            queue_size = int(self.reg_sampling_size.item())
+            if queue_size > 0:
+                return queue_size
+        return int(self.reg_sample_pts.shape[0])
 
     def get_votes(self):
         v = 0
         if self.data_sampler == 'regular':
             with self.worker_lock:
-                reg_sampling_N = float(self.reg_sample_pts.shape[0])
+                reg_sampling_N = float(self.get_reg_sampling_size())
                 v = float(self.reg_votes.item())
                 v += float(self.reg_sampling_i.item()) / reg_sampling_N
         return v
     
-    def sample_input_center(self, center_noise=0.05):
+    def sample_input_center(self, center_noise=0.05, return_sampling_meta=False):
+
+        # Invalid values identify random training and test samples, which do
+        # not participate in validation-cycle accounting.
+        sampling_meta = (-1, -1, -1)
 
         if self.data_sampler == 'regular':
             
             with self.worker_lock:
                     
                 # Case if we reach the end of the regular sampling points
-                reg_sampling_N = int(self.reg_sample_pts.shape[0])
+                reg_sampling_N = self.get_reg_sampling_size()
                 if self.reg_sampling_i >= reg_sampling_N:
                     if self.set == 'validation':
                         # Recompute new ones if we are in validation
                         self.reg_sampling_i *= 0
                         self.new_reg_sampling_pts()
                         self.reg_votes += 1
+                        reg_sampling_N = self.get_reg_sampling_size()
                     else:
                         # Stop generating if we are in test 
+                        if return_sampling_meta:
+                            return None, None, sampling_meta
                         return None, None
+
+                # Capture queue identity before advancing the shared cursor.
+                # The lock keeps metadata paired with the selected room center.
+                reg_vote_id = int(self.reg_votes.item())
+                reg_sampling_index = int(self.reg_sampling_i.item())
+                reg_sampling_size = reg_sampling_N
 
                 # Get next regular sampling element
                 cloud_ind = int(self.reg_sample_clouds[self.reg_sampling_i])
-                center_point = self.reg_sample_pts[self.reg_sampling_i].numpy()
+                center_point = self.reg_sample_pts[self.reg_sampling_i].numpy().copy()
 
                 # Update sampling index
                 self.reg_sampling_i += 1
+                if self.set == 'validation':
+                    sampling_meta = (
+                        reg_vote_id,
+                        reg_sampling_index,
+                        reg_sampling_size,
+                    )
 
         elif 'random' in self.data_sampler:
 
@@ -557,6 +620,8 @@ class SceneSegDataset(Dataset):
         else:
             raise ValueError('Unknown data_sampler type: {:s}. Must be in ("regular", "random", "c-random")'.format(self.data_sampler))
 
+        if return_sampling_meta:
+            return cloud_ind, center_point, sampling_meta
         return cloud_ind, center_point
 
     def get_input_area(self, cloud_ind, center_point, only_inds=False):
@@ -673,12 +738,17 @@ class SceneSegDataset(Dataset):
         pi_list = []
         pinv_list = []
         ci_list = []
+        reg_vote_list = []
+        reg_sampling_index_list = []
+        reg_sampling_size_list = []
         batch_n_pts = 0
 
         while True:
 
             # Pick an input area center randomly
-            cloud_ind, c_point = self.sample_input_center()
+            cloud_ind, c_point, sampling_meta = self.sample_input_center(
+                return_sampling_meta=True
+            )
 
             # In case we reach the end of the test epoch
             if cloud_ind is None:
@@ -754,6 +824,10 @@ class SceneSegDataset(Dataset):
             pinv_list += [inv_inds]
             i_list += [torch.from_numpy(c_point)]
             ci_list += [cloud_ind]
+            reg_vote_id, reg_sampling_index, reg_sampling_size = sampling_meta
+            reg_vote_list.append(reg_vote_id)
+            reg_sampling_index_list.append(reg_sampling_index)
+            reg_sampling_size_list.append(reg_sampling_size)
 
             # Update batch size
             batch_n_pts += int(in_points.shape[0])
@@ -795,6 +869,9 @@ class SceneSegDataset(Dataset):
         input_invs = torch.cat(pinv_list, dim=0)
         stack_lengths = torch.LongTensor([int(pp.shape[0]) for pp in p_list])
         stack_lengths0 = torch.LongTensor([int(pp.shape[0]) for pp in pi_list])
+        reg_vote_ids = torch.LongTensor(reg_vote_list)
+        reg_sampling_inds = torch.LongTensor(reg_sampling_index_list)
+        reg_sampling_sizes = torch.LongTensor(reg_sampling_size_list)
     
         # Optional Mix3D augment (we just need to modify the lengths)
         if self.set == 'training' and self.cfg.augment_train.mix3D > 0:
@@ -851,6 +928,9 @@ class SceneSegDataset(Dataset):
         input_dict.center_points = center_points
         input_dict.input_inds = input_inds
         input_dict.input_invs = input_invs
+        input_dict.reg_vote_ids = reg_vote_ids
+        input_dict.reg_sampling_inds = reg_sampling_inds
+        input_dict.reg_sampling_sizes = reg_sampling_sizes
 
         return input_dict
 
@@ -1193,7 +1273,7 @@ class SceneSegSampler(Sampler):
 
         # Only perform validation for a portion of the validation test at each epoch
         if dataset.set =='validation' and dataset.data_sampler == 'regular':
-            reg_sampling_N = int(dataset.reg_sample_pts.shape[0])
+            reg_sampling_N = dataset.get_reg_sampling_size()
             self.N = min(self.N, int(np.ceil(reg_sampling_N * 0.67)))
             self.N = max(self.N, int(np.ceil(reg_sampling_N * 0.34)))
 
@@ -1263,4 +1343,3 @@ class SceneSegBatch:
 
 def SceneSegCollate(batch_data):
     return SceneSegBatch(batch_data)
-
