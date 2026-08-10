@@ -8,6 +8,7 @@ export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 DATASET_PATH="${DATASET_PATH:-$SCRIPT_DIR/data/s3dis}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 SEED="${SEED:-57106803}"
+KP_MODE="${KP_MODE:-kpconvd}"
 PATCH_SIZE="${PATCH_SIZE:-128}"
 HANDOVER_STAGE="${HANDOVER_STAGE:-0}"
 if [[ -n "${CONV_STAGES:-}" ]]; then
@@ -18,6 +19,15 @@ else
   CONV_STAGES=3
 fi
 FA_ENABLED="${FA_ENABLED:-0}"
+AMP_ENABLED="${AMP_ENABLED:-}"
+AMP_DTYPE="${AMP_DTYPE:-}"
+AMP_ARGS=()
+if [[ -n "$AMP_ENABLED" ]]; then
+  AMP_ARGS+=(--amp_enabled "$AMP_ENABLED")
+fi
+if [[ -n "$AMP_DTYPE" ]]; then
+  AMP_ARGS+=(--amp_dtype "$AMP_DTYPE")
+fi
 RESUME_PATH="${RESUME_PATH:-}"
 LOG_ARGS=()
 if [[ -n "${LOG_PATH:-}" ]]; then
@@ -37,14 +47,16 @@ if [[ -n "$RESUME_PATH" ]]; then
   )
 else
   # The default (2,2,2,6,2) follows LitePT-S depth allocation while preserving
-  # KPConvX's stem, point pyramid and channel schedule. Pass --layer_blocks after
-  # this script to override it, for example with 3 3 9 12 3 for a depth-matched run.
+  # KPNeXt's stem, point pyramid and channel schedule. High-resolution stages use
+  # KPConvD by default; set KP_MODE=kpconvx only for an explicit secondary baseline.
+  # Pass --layer_blocks after this script to override the depth allocation, for
+  # example with 3 3 9 12 3 for a depth-matched run.
   TRAIN_COMMAND=(
     "$PYTHON_BIN" experiments/S3DIS/train_S3DIS.py
     --dataset_path "$DATASET_PATH"
     "${LOG_ARGS[@]}"
     --seed "$SEED"
-    --kp_mode kpconvx
+    --kp_mode "$KP_MODE"
     --layer_blocks 2 2 2 6 2
     --litept_enabled 1
     --litept_conv_stages "$CONV_STAGES"
@@ -68,13 +80,14 @@ else
     --fa_chunk_size 16384
     --fa_cross_layer 1
     --fa_spatial 1
+    "${AMP_ARGS[@]}"
     "$@"
   )
 fi
 
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
-  printf 'SEED=%q FA_ENABLED=%q OMP_NUM_THREADS=%q CUDA_VISIBLE_DEVICES=%q PYTORCH_CUDA_ALLOC_CONF=%q LITEPT_PROFILE_SERIALIZATION=%q LITEPT_SMOKE_METRICS=%q\n' \
-    "$SEED" "$FA_ENABLED" "${OMP_NUM_THREADS:-}" "${CUDA_VISIBLE_DEVICES:-}" \
+  printf 'SEED=%q KP_MODE=%q FA_ENABLED=%q AMP_ENABLED=%q AMP_DTYPE=%q OMP_NUM_THREADS=%q CUDA_VISIBLE_DEVICES=%q PYTORCH_CUDA_ALLOC_CONF=%q LITEPT_PROFILE_SERIALIZATION=%q LITEPT_SMOKE_METRICS=%q\n' \
+    "$SEED" "$KP_MODE" "$FA_ENABLED" "$AMP_ENABLED" "$AMP_DTYPE" "${OMP_NUM_THREADS:-}" "${CUDA_VISIBLE_DEVICES:-}" \
     "${PYTORCH_CUDA_ALLOC_CONF:-}" "${LITEPT_PROFILE_SERIALIZATION:-0}" \
     "${LITEPT_SMOKE_METRICS:-0}"
   printf 'Command:'

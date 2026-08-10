@@ -8,6 +8,15 @@ export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 DATASET_PATH="${DATASET_PATH:-$SCRIPT_DIR/data/ScanObjectNN/main_split}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 SEED="${SEED:-57106803}"
+AMP_ENABLED="${AMP_ENABLED:-}"
+AMP_DTYPE="${AMP_DTYPE:-}"
+AMP_ARGS=()
+if [[ -n "$AMP_ENABLED" ]]; then
+  AMP_ARGS+=(--amp_enabled "$AMP_ENABLED")
+fi
+if [[ -n "$AMP_DTYPE" ]]; then
+  AMP_ARGS+=(--amp_dtype "$AMP_DTYPE")
+fi
 RESUME_PATH="${RESUME_PATH:-}"
 LOG_ARGS=()
 if [[ -n "${LOG_PATH:-}" ]]; then
@@ -37,4 +46,5 @@ exec "$PYTHON_BIN" experiments/ScanObjectNN/train_ScanObj.py \
   --fa_chunk_size 4096 \
   --fa_cross_layer 1 \
   --fa_spatial 1 \
+  "${AMP_ARGS[@]}" \
   "$@"

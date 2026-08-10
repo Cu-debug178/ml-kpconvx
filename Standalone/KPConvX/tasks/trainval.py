@@ -29,6 +29,10 @@ import matplotlib.pyplot as plt
 
 from utils.gpu_init import init_gpu
 from utils.checkpoint_state import atomic_torch_save, capture_rng_state, restore_rng_state
+from utils.mixed_precision import (create_grad_scaler,
+                                   mixed_precision_state_dict,
+                                   resolve_mixed_precision,
+                                   restore_mixed_precision_state)
 from utils.training_schedule import EpochMultiplicativeLRScheduler, periodic_checkpoint_due
 
 from tasks.training import training_epoch, training_epoch_debug
@@ -68,6 +72,15 @@ def train_and_validate(net, training_loader, val_loader, cfg, chkp_path=None, fi
         device = init_gpu()
     else:
         device = torch.device("cpu")
+
+    amp_settings = resolve_mixed_precision(cfg.train, device)
+    amp_status = "enabled" if amp_settings.enabled else "disabled"
+    scaler_status = "enabled" if amp_settings.grad_scaler_enabled else "disabled"
+    print(
+        "Mixed precision: {} (dtype={}, GradScaler={})".format(
+            amp_status, amp_settings.dtype_name, scaler_status
+        )
+    )
         
 
     ####################
@@ -125,6 +138,7 @@ def train_and_validate(net, training_loader, val_loader, cfg, chkp_path=None, fi
     # Preserve the original epoch-wise multiplicative schedule while making
     # its position explicit and checkpointable.
     lr_scheduler = EpochMultiplicativeLRScheduler(optimizer, cfg.train.lr_decays)
+    grad_scaler = create_grad_scaler(amp_settings, device)
 
 
     ##########################
@@ -174,6 +188,11 @@ def train_and_validate(net, training_loader, val_loader, cfg, chkp_path=None, fi
                 restore_rng_state(checkpoint['rng_state'])
             else:
                 print("Legacy checkpoint: exact RNG streams were not recorded.")
+            restore_mixed_precision_state(
+                checkpoint.get('mixed_precision_state_dict'),
+                amp_settings,
+                grad_scaler,
+            )
             net.train()
             print("Model and training state restored.")
 
@@ -225,7 +244,18 @@ def train_and_validate(net, training_loader, val_loader, cfg, chkp_path=None, fi
             epoch_tries += 1
             if epoch_tries > 5:
                 raise ValueError('The network is too big for this GPU. Try changing parameters.')
-            finished_epoch = training_epoch(epoch, t0, net, optimizer, training_loader, cfg, PID_file, device)
+            finished_epoch = training_epoch(
+                epoch,
+                t0,
+                net,
+                optimizer,
+                training_loader,
+                cfg,
+                PID_file,
+                device,
+                amp_settings,
+                grad_scaler,
+            )
             torch.cuda.empty_cache()
 
             # Try to free some memory again
@@ -251,18 +281,30 @@ def train_and_validate(net, training_loader, val_loader, cfg, chkp_path=None, fi
         # Validation
         net.eval()
         with torch.no_grad():
-            validation_epoch(epoch, net, val_loader, cfg, val_data, device)
+            validation_epoch(
+                epoch,
+                net,
+                val_loader,
+                cfg,
+                val_data,
+                device,
+                amp_settings,
+            )
         net.train()
 
         # Save after validation so the RNG state is the true starting state of
         # the next training epoch. An interrupted epoch can then be replayed
         # from its boundary with the same process RNG streams.
         if cfg.exp.saving:
-            save_dict = {'checkpoint_format_version': 2,
+            save_dict = {'checkpoint_format_version': 3,
                          'epoch': epoch,
                          'model_state_dict': net.state_dict(),
                          'optimizer_state_dict': optimizer.state_dict(),
                          'lr_scheduler_state_dict': lr_scheduler.state_dict(),
+                         'mixed_precision_state_dict': mixed_precision_state_dict(
+                             amp_settings,
+                             grad_scaler,
+                         ),
                          'rng_state': capture_rng_state(),
                          'train_batch_limit': training_loader.dataset.b_lim,
                          'test_batch_limit': val_loader.dataset.b_lim,

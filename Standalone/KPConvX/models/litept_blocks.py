@@ -536,7 +536,10 @@ class SerializedPointROPEAttention(nn.Module):
         attended = self.projection_dropout(self.projection(attended))
 
         # Each real point appears exactly once; padded outputs are intentionally ignored.
-        output = torch.empty_like(features)
+        # Autocast can keep the residual features in FP32 while Linear/SDPA
+        # outputs use BF16 or FP16. index_copy_ requires matching dtypes, so
+        # allocate from the projected attention output rather than the input.
+        output = torch.empty_like(features, dtype=attended.dtype)
         flat_valid = valid_mask.reshape(-1)
         flat_indices = patch_indices.reshape(-1)[flat_valid]
         flat_output = attended.reshape(-1, self.channels)[flat_valid]

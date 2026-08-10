@@ -1,0 +1,16 @@
+checkpoint_file,internal_epoch,size_bytes,format_version,model_state,optimizer_state,lr_scheduler_state,rng_state,adaptive_batch_limits,status_at_report_creation
+chkp_0100.tar,100,145257038,2,true,true,true,true,true,periodic
+chkp_0110.tar,110,145257038,2,true,true,true,true,true,periodic
+chkp_0120.tar,120,145257038,2,true,true,true,true,true,selected_by_identity
+chkp_0130.tar,130,145257038,2,true,true,true,true,true,periodic
+chkp_0140.tar,140,145257038,2,true,true,true,true,true,periodic
+chkp_0150.tar,150,145257038,2,true,true,true,true,true,periodic
+chkp_0160.tar,160,145257038,2,true,true,true,true,true,periodic
+chkp_0170.tar,170,145257038,2,true,true,true,true,true,periodic
+chkp_0180.tar,180,145257038,2,true,true,true,true,true,periodic
+chkp_0190.tar,190,145257038,2,true,true,true,true,true,periodic
+chkp_0200.tar,200,145257038,2,true,true,true,true,true,periodic
+chkp_0210.tar,210,145257038,2,true,true,true,true,true,periodic
+chkp_0220.tar,220,145257038,2,true,true,true,true,true,periodic
+chkp_0230.tar,230,145257038,2,true,true,true,true,true,periodic
+current_chkp.tar,234,145264462,2,true,true,true,true,true,latest_completed

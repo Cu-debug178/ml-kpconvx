@@ -1,0 +1,17 @@
+dataset,split,seed,checkpoint_file,internal_epoch,selection_role,protocol,votes_or_transforms,subcloud_miou_pct,fullcloud_miou_pct,return_code,status
+S3DIS,Area_5,57106803,chkp_0100.tar,100,candidate,deterministic_identity,1,NA,68.3,0,completed
+S3DIS,Area_5,57106803,chkp_0110.tar,110,candidate,deterministic_identity,1,NA,70.4,0,completed
+S3DIS,Area_5,57106803,chkp_0120.tar,120,selected,deterministic_identity,1,NA,70.7,0,completed
+S3DIS,Area_5,57106803,chkp_0130.tar,130,candidate,deterministic_identity,1,NA,69.4,0,completed
+S3DIS,Area_5,57106803,chkp_0140.tar,140,candidate,deterministic_identity,1,NA,69.7,0,completed
+S3DIS,Area_5,57106803,chkp_0150.tar,150,candidate,deterministic_identity,1,NA,69.6,0,completed
+S3DIS,Area_5,57106803,chkp_0160.tar,160,candidate,deterministic_identity,1,NA,69.9,0,completed
+S3DIS,Area_5,57106803,chkp_0170.tar,170,candidate,deterministic_identity,1,NA,69.5,0,completed
+S3DIS,Area_5,57106803,chkp_0180.tar,180,candidate,deterministic_identity,1,NA,69.9,0,completed
+S3DIS,Area_5,57106803,chkp_0190.tar,190,candidate,deterministic_identity,1,NA,69.6,0,completed
+S3DIS,Area_5,57106803,chkp_0200.tar,200,candidate,deterministic_identity,1,NA,69.9,0,completed
+S3DIS,Area_5,57106803,chkp_0210.tar,210,candidate,deterministic_identity,1,NA,70.0,0,completed
+S3DIS,Area_5,57106803,chkp_0220.tar,220,candidate,deterministic_identity,1,NA,70.0,0,completed
+S3DIS,Area_5,57106803,chkp_0230.tar,230,candidate,deterministic_identity,1,NA,69.8,0,completed
+S3DIS,Area_5,57106803,chkp_0120.tar,120,selected,standalone_vote,10,71.3,71.7,0,completed
+S3DIS,Area_5,57106803,chkp_0120.tar,120,selected,fixed_pointcept_style_tta,13,70.5,70.8,0,completed

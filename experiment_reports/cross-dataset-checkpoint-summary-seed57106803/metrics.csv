@@ -1,0 +1,16 @@
+dataset,split,experiment_id,model,fast_adapter,seed,checkpoint_role,checkpoint_file,internal_epoch,test_votes,validation_miou_pct,subcloud_miou_pct,fullcloud_miou_pct,oa_pct,macc_pct,throughput_instances_s,status,metric_protocol,provenance
+S3DIS,Area_5,S3DIS_KPConvX-L-4090D-24G,KPConvX-L,false,57106803,best_validation,best_mIoU_chkp.tar,348,10,75.7385,70.9,71.1,NA,NA,NA,completed,10-vote full-cloud evaluation,local results and checkpoint report
+S3DIS,Area_5,S3DIS_KPConvX-L-4090D-24G,KPConvX-L,false,57106803,final,current_chkp.tar,450,10,72.0,71.1,71.4,NA,NA,NA,completed,10-vote full-cloud evaluation,local results and checkpoint report
+S3DIS,Area_5,S3DIS_KPConvX-L-seed42,KPConvX-L,false,42,final,current_chkp.tar,300,10,NA,73.1,73.5,NA,NA,NA,completed,10-vote full-cloud evaluation,local result report
+S3DIS,Area_5,S3DIS_KPConvX-L-G4-FA-4080S,KPConvX-L,true,57106803,interrupted,current_chkp.tar,2,0,38.98,NA,NA,NA,NA,NA,interrupted,validation only,local result directory
+S3DIS,Area_5,S3DIS_KPConvX-L-G4-FA-preflight,KPConvX-L,true,57106803,preflight,current_chkp.tar,1,0,34.28,NA,NA,NA,NA,NA,preflight,one-epoch validation,local result directory
+S3DIS,Area_5,s3dis_litept_l0d_250_seed57106803,LitePT-L0D,false,57106803,best_test,chkp_0150,150,10,NA,NA,71.8,NA,NA,NA,report_only,10-vote full-cloud evaluation,existing experiment report; weights absent
+ScanObjectNN,main_split,D,KPConvD-L,false,57106803,best_vote10,chkp_0250.tar,249,10,NA,NA,NA,88.9,87.3,437.9,completed,10-vote OA/mAcc,checkpoint study report
+ScanObjectNN,main_split,D,KPConvD-L,false,57106803,late_epoch250,current_chkp.tar,250,10,NA,NA,NA,88.9,87.3,437.4,completed,10-vote OA/mAcc,checkpoint study report
+ScanObjectNN,main_split,D+FA,KPConvD-L,true,57106803,best_vote10,chkp_exact_0250.tar,250,10,NA,NA,NA,89.1,87.8,135.1,completed,10-vote OA/mAcc,checkpoint study report
+ScanObjectNN,main_split,X,KPConvX-L,false,57106803,best_vote10,chkp_0200.tar,199,10,NA,NA,NA,89.3,88.2,243.2,completed,10-vote OA/mAcc,checkpoint study report
+ScanObjectNN,main_split,X,KPConvX-L,false,57106803,late_epoch250,chkp_exact_0250.tar,250,10,NA,NA,NA,89.1,87.8,243.2,completed,10-vote OA/mAcc,checkpoint study report
+ScanObjectNN,main_split,X+FA,KPConvX-L,true,57106803,best_vote10,chkp_exact_0190.tar,190,10,NA,NA,NA,88.7,87.3,110.6,completed,10-vote OA/mAcc,checkpoint study report
+ScanObjectNN,main_split,X+FA,KPConvX-L,true,57106803,late_epoch250,chkp_exact_0250.tar,250,10,NA,NA,NA,88.3,86.7,110.0,completed,10-vote OA/mAcc,checkpoint study report
+S3DIS,Area_5,code_sync_smoke_s3dis,KPConvX-L,false,57106803,code_sync_smoke,current_chkp.tar,450,10,NA,71.1,71.4,NA,NA,NA,smoke_only,10-vote inference regression,commit e9fe986
+ScanObjectNN,main_split,code_sync_smoke_scanobjectnn_xfa,KPConvX-L,true,57106803,code_sync_smoke,current_chkp.tar,250,1,NA,NA,NA,88.0,86.2,103.4,smoke_only,1-vote inference regression,commit e9fe986

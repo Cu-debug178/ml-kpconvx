@@ -182,7 +182,7 @@ class KPNeXt(nn.Module):
         # Pooling block
         self.pooling_1 = self.get_pooling_block(
             C, layer_C[1], conv_r, conv_sig, cfg,
-            use_mod=(not use_conv) if not self.litept_enabled else False)
+            use_mod=self._pool_uses_kernel_attention(use_conv))
 
         # ------ Layers [2, 3, 4, 5] ------
         for layer in range(2, self.num_layers + 1):
@@ -210,7 +210,7 @@ class KPNeXt(nn.Module):
             if layer < self.num_layers:
                 pooling_i = self.get_pooling_block(
                     C, layer_C[l+1], conv_r, conv_sig, cfg,
-                    use_mod=(not use_conv) if not self.litept_enabled else False)
+                    use_mod=self._pool_uses_kernel_attention(use_conv))
                 setattr(self, 'pooling_{:d}'.format(layer), pooling_i)
 
         #####################
@@ -352,30 +352,38 @@ class KPNeXt(nn.Module):
         return self
 
     def _encoder_stage_kind(self, layer, original_use_conv):
-        """Return ``conv``, ``attention``, ``handover`` or ``kpconvx``."""
+        """Return the stage role without changing the configured KP operator."""
 
         if not self.litept_enabled:
-            return 'conv' if original_use_conv else 'kpconvx'
+            return 'forced_kpconvd' if original_use_conv else 'configured_conv'
         if layer == self.litept_handover_stage:
             return 'handover'
         if layer <= self.litept_conv_stages:
-            return 'conv'
+            return 'configured_conv'
         return 'attention'
+
+    def _pool_uses_kernel_attention(self, original_use_conv):
+        """Keep LitePT pooling consistent with the explicitly selected kp_mode."""
+
+        if self.litept_enabled:
+            return self.kp_mode == 'kpconvx'
+        return not original_use_conv
 
     def get_encoder_block(self, in_C, out_C, radius, sigma, cfg, layer, block_i,
                           shared_kp_data, stage_kind, drop_path):
         """Build a stage-tailored encoder block.
 
-        Early ``conv`` stages use KPConvD (kernel attention disabled).  Late
-        ``attention`` stages use serialized PointROPE token attention.  A
-        ``handover`` stage applies both operators sequentially.
+        Early ``configured_conv`` stages use the operator selected by
+        ``kp_mode``. Late ``attention`` stages use serialized PointROPE token
+        attention. A ``handover`` stage applies the configured convolution and
+        token attention sequentially.
         """
 
-        if stage_kind in {'conv', 'kpconvx'}:
+        if stage_kind in {'forced_kpconvd', 'configured_conv'}:
             return self.get_residual_block(
                 in_C, out_C, radius, sigma, cfg,
                 shared_kp_data=shared_kp_data,
-                conv_layer=(stage_kind == 'conv'),
+                conv_layer=(stage_kind == 'forced_kpconvd'),
                 drop_path=drop_path)
 
         voxel_size = max(
@@ -409,7 +417,7 @@ class KPNeXt(nn.Module):
             convolution = self.get_residual_block(
                 in_C, out_C, radius, sigma, cfg,
                 shared_kp_data=shared_kp_data,
-                conv_layer=True,
+                conv_layer=False,
                 drop_path=drop_path)
             attention = LitePointTransformerBlock(
                 in_channels=out_C,
@@ -844,8 +852,6 @@ class KPNeXt(nn.Module):
         correct = (predicted == target).sum().item()
 
         return correct / total
-
-
 
 
 

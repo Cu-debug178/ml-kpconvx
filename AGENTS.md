@@ -44,3 +44,7 @@
   repository unless the repository owner explicitly says otherwise.
 - Server shutdown must be an explicit opt-in. Do not stop or restart `cc-switch`
   or its local proxy while working in this repository.
+- AutoDL-specific safety: never execute `shutdown`, `poweroff`, or `halt` (including
+  `--help`, `--show`, `-c`, or dry-run forms), and never create an automatic
+  poweroff watcher or put poweroff logic in an `EXIT` trap. Inspect such files
+  only with read-only commands; instance power operations are console-only.

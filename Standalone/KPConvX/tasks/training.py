@@ -25,6 +25,7 @@ from os.path import exists, join
 import time
 
 from utils.printing import underline
+from utils.mixed_precision import autocast_context
 from utils.training_schedule import optimizer_step_monitor_due
 from utils.training_monitor import (append_fast_adapter_monitor,
                                     append_optimization_monitor,
@@ -40,7 +41,18 @@ from utils.training_monitor import (append_fast_adapter_monitor,
 #
 
 
-def training_epoch(epoch, t0, net, optimizer, training_loader, cfg, PID_file, device):
+def training_epoch(
+    epoch,
+    t0,
+    net,
+    optimizer,
+    training_loader,
+    cfg,
+    PID_file,
+    device,
+    amp_settings,
+    grad_scaler,
+):
 
     run_batch_size = 0
     mini_step = 0
@@ -130,8 +142,26 @@ def training_epoch(epoch, t0, net, optimizer, training_loader, cfg, PID_file, de
             if monitor_setter is not None:
                 monitor_setter(monitor_this_step)
 
-            # Forward pass
-            outputs = net(batch)
+            # Forward and loss use autocast only when explicitly requested.
+            # Coordinate tensors stay in FP32 because autocast does not mutate
+            # inputs; eligible matrix/attention operators select the AMP dtype.
+            with autocast_context(amp_settings, device):
+                outputs = net(batch)
+
+                # Compute loss
+                if 'lam' in batch.in_dict and len(batch.in_dict.lam) > 0:
+                    loss = net.loss_rsmix(
+                        outputs,
+                        batch.in_dict.labels,
+                        batch.in_dict.labels_b,
+                        batch.in_dict.lam,
+                    )
+                else:
+                    loss = net.loss(outputs, batch.in_dict.labels)
+
+                # Normalize loss before scaling so gradient accumulation keeps
+                # the same effective objective as full precision training.
+                loss = loss / cfg.train.accum_batch
 
             if profile_serialization:
                 profile_owner = net.module if hasattr(net, 'module') else net
@@ -141,16 +171,6 @@ def training_epoch(epoch, t0, net, optimizer, training_loader, cfg, PID_file, de
                     for key in step_serialization:
                         step_serialization[key] += profile[key]
             
-            # Compute loss
-            if 'lam' in batch.in_dict and len(batch.in_dict.lam) > 0:
-                loss = net.loss_rsmix(outputs, batch.in_dict.labels, batch.in_dict.labels_b, batch.in_dict.lam)
-            else:
-                loss = net.loss(outputs, batch.in_dict.labels)
-
-
-
-            # Normalize loss
-            loss = loss / cfg.train.accum_batch
             loss_value = loss.item()
             if not np.isfinite(loss_value):
                 raise FloatingPointError(
@@ -164,18 +184,13 @@ def training_epoch(epoch, t0, net, optimizer, training_loader, cfg, PID_file, de
                 torch.cuda.synchronize(device)
             t += [time.time()]
 
-            # Backward gradients
-            loss.backward()
+            # Backward gradients. The scaler is active for float16 and a
+            # transparent no-op for bfloat16 or full precision.
+            grad_scaler.scale(loss).backward()
 
             monitor_statistics = None
             monitor_adapter = None
             monitor_parameter_samples = None
-            if monitor_this_step:
-                monitor_statistics = collect_parameter_statistics(net)
-                monitor_parameter_samples = capture_parameter_samples(net)
-                adapter_getter = getattr(monitor_owner, 'runtime_monitoring_stats', None)
-                if adapter_getter is not None:
-                    monitor_adapter = adapter_getter()
 
             if 'cuda' in device.type:
                 torch.cuda.synchronize(device)
@@ -184,13 +199,32 @@ def training_epoch(epoch, t0, net, optimizer, training_loader, cfg, PID_file, de
             # Only perform an optimization step when we have accumulated enough gradients
             if (mini_step + 1) % cfg.train.accum_batch == 0:
 
+                # FP16 gradients must be unscaled before diagnostics and
+                # clipping. GradScaler permits one unscale call per step.
+                if grad_scaler.is_enabled():
+                    grad_scaler.unscale_(optimizer)
+
+                if monitor_this_step:
+                    monitor_statistics = collect_parameter_statistics(net)
+                    monitor_parameter_samples = capture_parameter_samples(net)
+                    adapter_getter = getattr(
+                        monitor_owner,
+                        'runtime_monitoring_stats',
+                        None,
+                    )
+                    if adapter_getter is not None:
+                        monitor_adapter = adapter_getter()
+
                 # Clip gradient
                 if cfg.train.grad_clip > 0:
                     #torch.nn.utils.clip_grad_norm_(net.parameters(), cfg.train.grad_clip)
                     torch.nn.utils.clip_grad_value_(net.parameters(), cfg.train.grad_clip)
 
-                # Optimizer step
-                optimizer.step()
+                # Optimizer step. For float16 this skips unsafe updates and
+                # adjusts the dynamic loss scale; otherwise it is equivalent
+                # to optimizer.step().
+                grad_scaler.step(optimizer)
+                grad_scaler.update()
 
                 if monitor_this_step and monitor_parameter_samples is not None:
                     monitor_statistics = merge_update_statistics(
@@ -469,6 +503,5 @@ def training_epoch_debug(epoch, net, optimizer, training_loader, cfg, PID_file, 
     all_cuda_stats = np.array(all_cuda_stats, dtype=np.float32)
     
     return all_cuda_stats
-
 
 

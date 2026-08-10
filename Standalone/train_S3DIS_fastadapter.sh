@@ -8,6 +8,15 @@ export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 DATASET_PATH="${DATASET_PATH:-$SCRIPT_DIR/data/s3dis}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 SEED="${SEED:-57106803}"
+AMP_ENABLED="${AMP_ENABLED:-}"
+AMP_DTYPE="${AMP_DTYPE:-}"
+AMP_ARGS=()
+if [[ -n "$AMP_ENABLED" ]]; then
+  AMP_ARGS+=(--amp_enabled "$AMP_ENABLED")
+fi
+if [[ -n "$AMP_DTYPE" ]]; then
+  AMP_ARGS+=(--amp_dtype "$AMP_DTYPE")
+fi
 LOG_ARGS=()
 if [[ -n "${LOG_PATH:-}" ]]; then
   LOG_ARGS=(--log_path "$LOG_PATH")
@@ -29,6 +38,7 @@ TRAIN_COMMAND=(
   --fa_chunk_size 16384
   --fa_cross_layer 1
   --fa_spatial 1
+  "${AMP_ARGS[@]}"
   "$@"
 )
 

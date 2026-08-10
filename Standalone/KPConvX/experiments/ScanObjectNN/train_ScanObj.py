@@ -42,6 +42,11 @@ parent = os.path.dirname(os.path.dirname(current))
 sys.path.append(parent)
 
 from utils.config import init_cfg, load_cfg, save_cfg, get_directories
+from utils.python_config import (
+    apply_config_options,
+    apply_python_config,
+    PythonConfigError,
+)
 from utils.printing import frame_lines_1, underline
 from utils.gpu_init import init_gpu
 
@@ -136,7 +141,7 @@ def my_config():
     cfg.model.fa_dropout = 0.0
     cfg.model.fa_residual_init = 1e-3
 
-    # LitePT-inspired hierarchy: KPConvD at high resolution, PointROPE token
+    # LitePT-inspired hierarchy: configured KP conv at high resolution, PointROPE token
     # attention at low resolution. Disabled by default for baseline parity.
     cfg.model.litept_enabled = False
     cfg.model.litept_conv_stages = 3
@@ -325,11 +330,6 @@ def adjust_config(cfg):
 if __name__ == '__main__':
 
     cfg = my_config()
-    set_seed(cfg.exp.seed)
-
-    # First create a tensor on GPU to signal that we use it
-    device = init_gpu()
-    a = torch.zeros((1,), device=device)
 
     ###################
     # Define parameters
@@ -338,6 +338,7 @@ if __name__ == '__main__':
     # Add argument here to handle it
     str_args = ['model.kp_mode',
                 'train.data_sampler',
+                'train.amp_dtype',
                 'model.kp_aggregation',
                 'model.kp_influence',
                 'model.norm',
@@ -385,7 +386,8 @@ if __name__ == '__main__':
                 'model.litept_num_heads',
                 'exp.seed']
 
-    bool_args = ['model.use_strided_conv',
+    bool_args = ['train.amp_enabled',
+                 'model.use_strided_conv',
                  'model.inv_grp_norm',
                  'model.kpx_upcut',
                  'data.use_cubes',
@@ -431,6 +433,10 @@ if __name__ == '__main__':
     # Log path special arg
     parser.add_argument('--dataset_path', type=str)
     parser.add_argument('--log_path', type=str)
+    parser.add_argument('--config', '--config-file', dest='config', type=str,
+                        help='Trusted Python override, relative to KPConvX/configs or the current directory.')
+    parser.add_argument('--options', nargs='+', metavar='SECTION.KEY=VALUE',
+                        help='Generic config overrides applied after the Python config and before named flags.')
     parser.add_argument('--resume_path', type=str,
                         help='Checkpoint from which to resume an interrupted training run.')
     parser.add_argument('--finetune_path', type=str,
@@ -441,6 +447,10 @@ if __name__ == '__main__':
     finetune_path = None
     if args.resume_path is not None and args.finetune_path is not None:
         parser.error('--resume_path and --finetune_path are mutually exclusive.')
+    if args.resume_path is not None and args.config is not None:
+        parser.error('--config is not allowed with --resume_path; the saved parameters.json must be used.')
+    if args.resume_path is not None and args.options is not None:
+        parser.error('--options is not allowed with --resume_path; the saved parameters.json must be used.')
 
     if args.finetune_path is not None:
         finetune_path = os.path.abspath(args.finetune_path)
@@ -474,6 +484,19 @@ if __name__ == '__main__':
         if changed_args:
             parser.error('Training-configuration overrides are not allowed when resuming: {:s}'.format(
                 ', '.join(changed_args)))
+
+    if resume_path is None and args.config is not None:
+        try:
+            cfg, config_path = apply_python_config(cfg, args.config)
+        except PythonConfigError as error:
+            parser.error(str(error))
+        print('Using Python config: {:s}'.format(config_path))
+
+    if resume_path is None and args.options is not None:
+        try:
+            cfg = apply_config_options(cfg, args.options)
+        except PythonConfigError as error:
+            parser.error(str(error))
 
     # Load data parameters
     if resume_path is not None:
@@ -517,6 +540,10 @@ if __name__ == '__main__':
 
     # Adjust config after parameters have been changed
     cfg = adjust_config(cfg)
+
+    # Claim the GPU only after all configuration inputs have been validated.
+    device = init_gpu()
+    a = torch.zeros((1,), device=device)
 
     
     ##############

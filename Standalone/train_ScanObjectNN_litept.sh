@@ -18,6 +18,15 @@ else
   CONV_STAGES=3
 fi
 FA_ENABLED="${FA_ENABLED:-0}"
+AMP_ENABLED="${AMP_ENABLED:-}"
+AMP_DTYPE="${AMP_DTYPE:-}"
+AMP_ARGS=()
+if [[ -n "$AMP_ENABLED" ]]; then
+  AMP_ARGS+=(--amp_enabled "$AMP_ENABLED")
+fi
+if [[ -n "$AMP_DTYPE" ]]; then
+  AMP_ARGS+=(--amp_dtype "$AMP_DTYPE")
+fi
 RESUME_PATH="${RESUME_PATH:-}"
 LOG_ARGS=()
 if [[ -n "${LOG_PATH:-}" ]]; then
@@ -58,4 +67,5 @@ exec "$PYTHON_BIN" experiments/ScanObjectNN/train_ScanObj.py \
   --fa_chunk_size 4096 \
   --fa_cross_layer 1 \
   --fa_spatial 1 \
+  "${AMP_ARGS[@]}" \
   "$@"

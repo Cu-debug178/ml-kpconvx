@@ -152,6 +152,9 @@ FlashAttention as hard dependencies.
 # S3DIS: C-C-C-A-A, LitePT-S block depths and lightweight decoder
 ./train_S3DIS_litept.sh
 
+# Explicit KPConvX secondary baseline (KPConvD is the default)
+KP_MODE=kpconvx ./train_S3DIS_litept.sh
+
 # ScanObjectNN classification
 ./train_ScanObjectNN_litept.sh
 
@@ -160,9 +163,10 @@ FA_ENABLED=1 ./train_S3DIS_litept.sh
 ```
 
 Both launchers accept `RESUME_PATH=/path/to/checkpoint.tar`; resumed runs use
-the configuration saved with the checkpoint.  The ScanObjectNN launcher keeps
-that experiment's current `kpconvd` default.  Pass `--kp_mode kpconvx` only for
-the explicit KPConvX secondary baseline.
+the configuration saved with the checkpoint.  The S3DIS launcher now defaults
+to `KP_MODE=kpconvd`, matching the intended C-C-C-A-A handover study.  Use
+`KP_MODE=kpconvx` only for the explicit KPConvX secondary baseline.  The
+ScanObjectNN launcher keeps that experiment's current `kpconvd` default.
 
 Useful ablations include `--litept_rope_enabled 0`,
 `HANDOVER_STAGE=3|4`, `--litept_patch_size 32|64|128|256`, and
@@ -175,3 +179,9 @@ when `HANDOVER_STAGE` is set, ensuring a monotonic C-to-X-to-A hierarchy.  See
 `../LITEPT_KPCONVX_IMPLEMENTATION_ZH.md` and
 `../litept_experiment_matrix.csv` for the implementation rationale and full
 experiment plan.
+
+For evidence-first analysis of what S3DIS contains, where one checkpoint
+fails, and which identical points a new model fixes, see
+[`KPConvX/tools/S3DIS_DIAGNOSTICS.md`](KPConvX/tools/S3DIS_DIAGNOSTICS.md).
+Dataset audit and offline prediction comparison remain usable when checkpoints
+live on another machine.

@@ -15,6 +15,12 @@ export PYTHONPATH=$PWD:$PYTHONPATH
 
 # You can change the path to your dataset here
 ARGS="--dataset_path $PWD/../data/s3dis"
+if [[ -n "${AMP_ENABLED:-}" ]]; then
+    ARGS="$ARGS --amp_enabled $AMP_ENABLED"
+fi
+if [[ -n "${AMP_DTYPE:-}" ]]; then
+    ARGS="$ARGS --amp_dtype $AMP_DTYPE"
+fi
 
 # Here you can define arguments to change network/training parameters.
 # For example:
@@ -34,5 +40,4 @@ EXP="S3DIS"
 SCRIPT="train_S3DIS.py"
 
 # Start the training
-python3 experiments/$EXP/$SCRIPT $ARGS
-
+python3 experiments/$EXP/$SCRIPT $ARGS "$@"

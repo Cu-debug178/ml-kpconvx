@@ -17,7 +17,9 @@ import torch
 
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DIR = os.path.join(ROOT, "Standalone", "KPConvX")
+PROJECT_DIR = os.environ.get(
+    "KP_CONVX_PROJECT_DIR", os.path.join(ROOT, "Standalone", "KPConvX")
+)
 if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 

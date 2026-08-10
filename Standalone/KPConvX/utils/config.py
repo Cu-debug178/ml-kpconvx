@@ -52,6 +52,9 @@ def init_cfg():
     cfg.exp.log_dir = ''                #   Str, directory where this experiemnt is saved
     cfg.exp.seed = 42                   #   Int, seed for random stuff
     cfg.exp.saving = True               #  Bool, is the experiment saved or not
+    cfg.exp.config_file = ''            #   Str, selected declarative config (empty for built-in defaults)
+    cfg.exp.config_sources = []         #  List, inherited config sources and their SHA-256 hashes
+    cfg.exp.config_options = []         #  List, generic command-line config overrides
 
 
     # Data parameters
@@ -145,7 +148,7 @@ def init_cfg():
     cfg.model.fa_residual_init = 1e-3    # Float, initial A2P residual scale
 
     # LitePT-inspired stage-specialized encoder
-    cfg.model.litept_enabled = False              #  Bool, use KPConvD early and PointROPE attention late
+    cfg.model.litept_enabled = False              #  Bool, use configured KP conv early and PointROPE attention late
     cfg.model.litept_conv_stages = 3              #   Int, number of leading convolution-only stages
     cfg.model.litept_handover_stage = 0           #   Int, optional conv_stages + 1 stage using convolution + attention
     cfg.model.litept_patch_size = 128             #   Int, serialized local-attention patch size
@@ -191,6 +194,8 @@ def init_cfg():
     cfg.train.lr_decays = {'10': 0.1}   #  Dict, decay values with their epoch {epoch: decay}
     cfg.train.warmup = True             #  Bool, should the first epoch be a warmup
     cfg.train.grad_clip = 100.0         #   Int, gradient clipping value (negative means no clipping)
+    cfg.train.amp_enabled = False       #  Bool, enable CUDA automatic mixed precision
+    cfg.train.amp_dtype = 'bfloat16'    #   Str, mixed precision dtype ('bfloat16' or 'float16')
     cfg.train.monitor_enabled = False   #  Bool, periodically log optimizer/module diagnostics
     cfg.train.monitor_interval = 50     #   Int, optimizer steps between diagnostic snapshots
     cfg.train.class_w = []              #  List, weight for each class in the segmentation loss

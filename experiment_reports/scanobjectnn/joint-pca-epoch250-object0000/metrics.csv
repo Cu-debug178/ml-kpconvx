@@ -1,0 +1,22 @@
+metric_family,model,architecture,mode,stage,metric,value,unit,notes
+pca,all_models,all,shared,0,explained_variance_ratio_3,0.315524,ratio,one shared basis across six forwards
+pca,all_models,all,shared,1,explained_variance_ratio_3,0.249329,ratio,one shared basis across six forwards
+pca,all_models,all,shared,2,explained_variance_ratio_3,0.351614,ratio,one shared basis across six forwards
+pca,all_models,all,shared,3,explained_variance_ratio_3,0.492844,ratio,one shared basis across six forwards
+pca,all_models,all,shared,4,explained_variance_ratio_3,0.410761,ratio,one shared basis across six forwards
+classification,KPConvD Grid-only,kpconvd,grid,0,top1_probability,0.652611,probability,object_index_0_true_class_0
+classification,KPConvD FastAdapter bypass,kpconvd,bypass,0,top1_probability,0.812542,probability,object_index_0_true_class_0
+classification,KPConvD FastAdapter,kpconvd,adapter,0,top1_probability,0.635285,probability,object_index_0_true_class_0
+classification,KPConvX Grid-only,kpconvx,grid,0,top1_probability,0.605709,probability,object_index_0_true_class_0
+classification,KPConvX FastAdapter bypass,kpconvx,bypass,0,top1_probability,0.567884,probability,object_index_0_true_class_0
+classification,KPConvX FastAdapter,kpconvx,adapter,0,top1_probability,0.770218,probability,object_index_0_true_class_0
+adapter_delta,KPConvD FastAdapter,kpconvd,adapter,0,mean_l2_delta,5.975511,L2,enabled versus same checkpoint bypass
+adapter_delta,KPConvD FastAdapter,kpconvd,adapter,1,mean_l2_delta,5.054604,L2,enabled versus same checkpoint bypass
+adapter_delta,KPConvD FastAdapter,kpconvd,adapter,2,mean_l2_delta,9.397493,L2,enabled versus same checkpoint bypass
+adapter_delta,KPConvD FastAdapter,kpconvd,adapter,3,mean_l2_delta,8.206376,L2,enabled versus same checkpoint bypass
+adapter_delta,KPConvD FastAdapter,kpconvd,adapter,4,mean_l2_delta,1.890092,L2,enabled versus same checkpoint bypass
+adapter_delta,KPConvX FastAdapter,kpconvx,adapter,0,mean_l2_delta,1.540411,L2,enabled versus same checkpoint bypass
+adapter_delta,KPConvX FastAdapter,kpconvx,adapter,1,mean_l2_delta,1.261570,L2,enabled versus same checkpoint bypass
+adapter_delta,KPConvX FastAdapter,kpconvx,adapter,2,mean_l2_delta,24.740273,L2,enabled versus same checkpoint bypass
+adapter_delta,KPConvX FastAdapter,kpconvx,adapter,3,mean_l2_delta,1.754652,L2,enabled versus same checkpoint bypass
+adapter_delta,KPConvX FastAdapter,kpconvx,adapter,4,mean_l2_delta,1.703298,L2,enabled versus same checkpoint bypass

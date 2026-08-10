@@ -192,6 +192,36 @@ class AttentionTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(output).all())
         self.assertTrue(torch.isfinite(features.grad).all())
 
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is not available")
+    def test_cuda_attention_supports_both_amp_dtypes(self):
+        torch.manual_seed(33)
+        device = torch.device("cuda")
+        points = torch.randn(19, 3, device=device)
+        lengths = torch.tensor([8, 11], dtype=torch.long, device=device)
+        attention = SerializedPointROPEAttention(
+            channels=96,
+            num_heads=4,
+            patch_size=8,
+            order="z-trans",
+        ).to(device)
+
+        for dtype in (torch.bfloat16, torch.float16):
+            with self.subTest(dtype=dtype):
+                features = torch.randn(
+                    19,
+                    96,
+                    device=device,
+                    requires_grad=True,
+                )
+                attention.zero_grad(set_to_none=True)
+                with torch.autocast(device_type="cuda", dtype=dtype):
+                    output = attention(points, features, lengths, voxel_size=0.2)
+                    loss = output.float().square().mean()
+                loss.backward()
+                self.assertEqual(output.dtype, dtype)
+                self.assertTrue(torch.isfinite(output).all())
+                self.assertTrue(torch.isfinite(features.grad).all())
+
     def test_non_divisible_kpconvx_width_uses_valid_inner_dimension(self):
         attention = SerializedPointROPEAttention(
             channels=256,

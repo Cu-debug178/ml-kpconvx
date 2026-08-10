@@ -2,7 +2,7 @@
 
 The production project builds point pyramids with compiled operators.  These
 checks inject a complete synthetic pyramid, so they exercise the actual stem,
-KPConvD stages, PointROPE attention stages, pooling, heads and backward pass
+configured KPConv stages, PointROPE attention stages, pooling, heads and backward pass
 without requiring the C++ extensions in a lightweight CI environment.
 """
 
@@ -42,7 +42,11 @@ sys.modules.setdefault("utils.torch_pyramid", torch_pyramid_module)
 
 from models.KPNext import KPNeXt  # noqa: E402
 from models.litept_blocks import LiteHandoverBlock, LitePointTransformerBlock  # noqa: E402
+from models.kpnext_blocks import KPConvD, KPConvX  # noqa: E402
 from utils.config import init_cfg  # noqa: E402
+from utils.mixed_precision import (MixedPrecisionSettings,  # noqa: E402
+                                   autocast_context,
+                                   create_grad_scaler)
 
 
 def _make_config(task, handover_stage=0):
@@ -174,6 +178,43 @@ def _make_batch(input_channels):
 
 class KPNeXtLitePTIntegrationTests(unittest.TestCase):
 
+    def test_configured_kp_mode_controls_litept_convolution_stages(self):
+        kpconvx_model = KPNeXt(_make_config("classification"))
+        self.assertIsInstance(kpconvx_model.encoder_1[0].conv, KPConvX)
+        self.assertIsInstance(kpconvx_model.encoder_2[0].conv, KPConvX)
+        self.assertIsInstance(kpconvx_model.encoder_3[0].conv, KPConvX)
+        self.assertIsInstance(
+            kpconvx_model.encoder_4[0], LitePointTransformerBlock
+        )
+
+        kpconvd_cfg = _make_config("classification")
+        kpconvd_cfg.model.kp_mode = "kpconvd"
+        kpconvd_model = KPNeXt(kpconvd_cfg)
+        self.assertIsInstance(kpconvd_model.encoder_1[0].conv, KPConvD)
+        self.assertIsInstance(kpconvd_model.encoder_2[0].conv, KPConvD)
+        self.assertIsInstance(kpconvd_model.encoder_3[0].conv, KPConvD)
+
+    def test_litept_pooling_respects_configured_kp_mode(self):
+        kpconvx_cfg = _make_config("classification")
+        kpconvx_cfg.model.grid_pool = False
+        kpconvx_cfg.model.use_strided_conv = False
+        kpconvx_model = KPNeXt(kpconvx_cfg)
+        self.assertIsInstance(kpconvx_model.pooling_1.conv, KPConvX)
+
+        kpconvd_cfg = _make_config("classification")
+        kpconvd_cfg.model.kp_mode = "kpconvd"
+        kpconvd_cfg.model.grid_pool = False
+        kpconvd_cfg.model.use_strided_conv = False
+        kpconvd_model = KPNeXt(kpconvd_cfg)
+        self.assertIsInstance(kpconvd_model.pooling_1.conv, KPConvD)
+
+    def test_non_litept_keeps_first_inv_layer_behavior(self):
+        cfg = _make_config("classification")
+        cfg.model.litept_enabled = False
+        model = KPNeXt(cfg)
+        self.assertIsInstance(model.encoder_1[0].conv, KPConvD)
+        self.assertIsInstance(model.encoder_2[0].conv, KPConvX)
+
     def test_handover_must_follow_convolution_only_stages(self):
         cfg = _make_config("classification", handover_stage=3)
         cfg.model.litept_conv_stages = 3
@@ -205,6 +246,7 @@ class KPNeXtLitePTIntegrationTests(unittest.TestCase):
         logits = model(batch)
         self.assertEqual(tuple(logits.shape), (2, 4))
         self.assertIsInstance(model.encoder_3[0], LiteHandoverBlock)
+        self.assertIsInstance(model.encoder_3[0].convolution.conv, KPConvX)
         logits.mean().backward()
         self.assertTrue(torch.isfinite(logits).all())
 
@@ -257,6 +299,31 @@ class KPNeXtLitePTIntegrationTests(unittest.TestCase):
         ]
         self.assertTrue(any(grad is not None for grad in adapter_grads))
         self.assertTrue(torch.isfinite(logits).all())
+
+    def test_bfloat16_switch_runs_kpconvd_litept_and_fastadapter(self):
+        torch.manual_seed(15)
+        cfg = _make_config("classification")
+        cfg.model.kp_mode = "kpconvd"
+        cfg.model.fa_enabled = True
+        model = KPNeXt(cfg)
+        batch = _make_batch(input_channels=4)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+        device = torch.device("cpu")
+        settings = MixedPrecisionSettings(True, "bfloat16", torch.bfloat16)
+        scaler = create_grad_scaler(settings, device)
+
+        with autocast_context(settings, device):
+            logits = model(batch)
+            loss = logits.float().square().mean()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+        self.assertEqual(logits.dtype, torch.bfloat16)
+        self.assertTrue(torch.isfinite(logits).all())
+        self.assertTrue(any(
+            parameter.grad is not None for parameter in model.parameters()
+        ))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,14 @@
+dataset,experiment_id,model,fast_adapter,seed,checkpoint_file,internal_epoch,training_status,evaluation_status,notes
+S3DIS,S3DIS_KPConvX-L-4090D-24G,KPConvX-L,false,57106803,best_mIoU_chkp.tar,348,completed,tested_10_votes,selected validation checkpoint
+S3DIS,S3DIS_KPConvX-L-4090D-24G,KPConvX-L,false,57106803,current_chkp.tar,450,completed,tested_10_votes,final checkpoint
+S3DIS,S3DIS_KPConvX-L-seed42,KPConvX-L,false,42,current_chkp.tar,300,completed,tested_10_votes,older local run
+S3DIS,S3DIS_KPConvX-L-G4-FA-4080S,KPConvX-L,true,57106803,current_chkp.tar,2,interrupted,not_tested,no final evaluation
+S3DIS,S3DIS_KPConvX-L-G4-FA-preflight,KPConvX-L,true,57106803,chkp_0002.tar,1,preflight,not_tested,duplicate internal epoch with current checkpoint
+S3DIS,S3DIS_KPConvX-L-G4-FA-preflight,KPConvX-L,true,57106803,current_chkp.tar,1,preflight,not_tested,duplicate internal epoch with chkp_0002
+ScanObjectNN,D,KPConvD-L,false,57106803,chkp_0250.tar,249,completed,tested_10_votes,checkpoint study
+ScanObjectNN,D,KPConvD-L,false,57106803,current_chkp.tar,250,completed,tested_10_votes,checkpoint study
+ScanObjectNN,D+FA,KPConvD-L,true,57106803,current_chkp.tar,250,completed,tested_10_votes,checkpoint study
+ScanObjectNN,X,KPConvX-L,false,57106803,chkp_0200.tar,199,completed,tested_10_votes,checkpoint study
+ScanObjectNN,X,KPConvX-L,false,57106803,current_chkp.tar,250,completed,tested_10_votes,checkpoint study
+ScanObjectNN,X+FA,KPConvX-L,true,57106803,chkp_exact_0190.tar,190,completed,tested_10_votes,exact epoch archive
+ScanObjectNN,X+FA,KPConvX-L,true,57106803,current_chkp.tar,250,completed,tested_10_votes,checkpoint study

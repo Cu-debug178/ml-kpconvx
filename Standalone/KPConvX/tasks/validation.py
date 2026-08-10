@@ -28,6 +28,7 @@ import pickle
 # PLY reader
 from utils.ply import read_ply, write_ply
 from utils.metrics import IoU_from_confusions, fast_confusion
+from utils.mixed_precision import autocast_context
 
 from utils.printing import underline
 
@@ -38,10 +39,12 @@ from utils.printing import underline
 #
 
 
-def validation_epoch(epoch, net, val_loader, cfg, val_data, device):
+def validation_epoch(epoch, net, val_loader, cfg, val_data, device, amp_settings):
 
     if cfg.data.task == 'classification':
-        object_classification_validation(epoch, net, val_loader, cfg, val_data, device)
+        object_classification_validation(
+            epoch, net, val_loader, cfg, val_data, device, amp_settings
+        )
 
     elif cfg.data.task == 'part_segmentation':
         object_segmentation_validation(epoch, net, val_loader, cfg, val_data, device)
@@ -50,7 +53,9 @@ def validation_epoch(epoch, net, val_loader, cfg, val_data, device):
         object_segmentation_validation(epoch, net, val_loader, cfg, val_data, device)
 
     elif cfg.data.task == 'cloud_segmentation':
-        cloud_segmentation_validation(epoch, net, val_loader, cfg, val_data, device)
+        cloud_segmentation_validation(
+            epoch, net, val_loader, cfg, val_data, device, amp_settings
+        )
 
     elif cfg.data.task == 'slam_segmentation':
         slam_segmentation_validation(epoch, net, val_loader, cfg, val_data, device)
@@ -70,7 +75,16 @@ def validation_epoch(epoch, net, val_loader, cfg, val_data, device):
 #
 
 
-def cloud_segmentation_validation(epoch, net, val_loader, cfg, val_data, device, debug=False):
+def cloud_segmentation_validation(
+    epoch,
+    net,
+    val_loader,
+    cfg,
+    val_data,
+    device,
+    amp_settings,
+    debug=False,
+):
     """
     Validation method for cloud segmentation models
     """
@@ -148,7 +162,9 @@ def cloud_segmentation_validation(epoch, net, val_loader, cfg, val_data, device,
         t += [time.time()]
 
         # Forward pass
-        outputs = net(batch)
+        with autocast_context(amp_settings, device):
+            outputs = net(batch)
+        outputs = outputs.float()
         
         if 'cuda' in device.type:
             torch.cuda.synchronize(device)
@@ -380,7 +396,16 @@ def cloud_segmentation_validation(epoch, net, val_loader, cfg, val_data, device,
     return
 
 
-def object_classification_validation(epoch, net, val_loader, cfg, val_data, device, debug=False):
+def object_classification_validation(
+    epoch,
+    net,
+    val_loader,
+    cfg,
+    val_data,
+    device,
+    amp_settings,
+    debug=False,
+):
     """
     Validation method for classification models
     """
@@ -449,7 +474,9 @@ def object_classification_validation(epoch, net, val_loader, cfg, val_data, devi
         t += [time.time()]
 
         # Forward pass
-        outputs = net(batch)
+        with autocast_context(amp_settings, device):
+            outputs = net(batch)
+        outputs = outputs.float()
         
         if 'cuda' in device.type:
             torch.cuda.synchronize(device)
@@ -563,7 +590,6 @@ def slam_segmentation_validation(epoch, net, val_loader, cfg, val_data, device, 
 
 def regression_validation(epoch, net, val_loader, cfg, val_data, device, debug=False):
     return
-
 
 
 
