@@ -161,6 +161,16 @@ def init_cfg():
     cfg.model.litept_projection_dropout = 0.0     # Float, projection/MLP dropout
     cfg.model.litept_orders = 'z,z-trans'         #   Str, comma-separated serialization orders
     cfg.model.litept_light_decoder = False        #  Bool, use only projection blocks in segmentation decoder
+    cfg.model.litept_legacy_kpconvd_encoder = False # Bool, reproduce legacy KPConvD encoder checkpoints
+
+    # Kernel-to-Token Geometry Handover (KTHA).  Disabled for baseline parity.
+    cfg.model.ktha_mode = 'none'                  # Str, none/concat/qk/relation_bias/matched_mlp
+    cfg.model.ktha_source_stage = 3               # Int, 1-based KP signature producer stage
+    cfg.model.ktha_target_stages = '4'            # Str, comma-separated 1-based attention stages
+    cfg.model.ktha_relation_dim = 8               # Int, per-head low-rank relation width
+    cfg.model.ktha_hidden_dim = 0                 # Int, concat/control hidden width; 0 selects automatically
+    cfg.model.ktha_shuffle_geometry = False       # Bool, shuffle signatures inside each packed room
+    cfg.model.ktha_train_mode = 'joint'           # Str, joint or module_head
 
     cfg.model.process_ratio = 1.0       # Float, ratio between the radius of processed volume and the radius of the input volume
     cfg.model.n_frames = 1              #   Int, number of frames used (Specific to SLAM)

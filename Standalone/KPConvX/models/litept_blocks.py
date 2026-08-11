@@ -27,6 +27,73 @@ from models.generic_blocks import DropPathPack
 
 
 _SUPPORTED_ORDERS = {"z", "z-trans"}
+_SUPPORTED_GEOMETRY_MODES = {
+    "none",
+    "concat",
+    "qk",
+    "relation_bias",
+    "matched_mlp",
+}
+
+
+def _distribution_summary(values: Tensor) -> dict[str, float]:
+    """Return compact finite-value statistics for opt-in diagnostics."""
+
+    finite = values.detach().float().reshape(-1)
+    finite = finite[torch.isfinite(finite)]
+    if finite.numel() == 0:
+        return {
+            "mean": float("nan"),
+            "std": float("nan"),
+            "p50": float("nan"),
+            "p90": float("nan"),
+        }
+    quantiles = torch.quantile(finite, finite.new_tensor([0.5, 0.9]))
+    return {
+        "mean": float(finite.mean().item()),
+        "std": float(finite.std(unbiased=False).item()),
+        "p50": float(quantiles[0].item()),
+        "p90": float(quantiles[1].item()),
+    }
+
+
+class _ExactParameterBudgetMLP(nn.Module):
+    """Feature-only residual MLP with an exact trainable-parameter budget."""
+
+    def __init__(self, channels: int, parameter_budget: int):
+        super().__init__()
+        if parameter_budget < 2:
+            raise ValueError("parameter budget is too small for the matched MLP")
+        self.channels = int(channels)
+        if parameter_budget >= 2 * channels:
+            hidden = max(1, parameter_budget // (2 * channels))
+            self.input_width = channels
+            self.output_width = channels
+        else:
+            hidden = 1
+            self.input_width = max(1, parameter_budget // 2)
+            self.output_width = max(1, parameter_budget - self.input_width)
+        matrix_parameters = hidden * (self.input_width + self.output_width)
+        self.weight_in = nn.Parameter(torch.empty(self.input_width, hidden))
+        self.weight_out = nn.Parameter(torch.empty(hidden, self.output_width))
+        self.extra = nn.Parameter(torch.zeros(parameter_budget - matrix_parameters))
+        nn.init.kaiming_uniform_(self.weight_in, a=math.sqrt(5))
+        nn.init.kaiming_uniform_(self.weight_out, a=math.sqrt(5))
+
+    def forward(self, features: Tensor) -> Tensor:
+        compact = F.gelu(features[..., : self.input_width] @ self.weight_in)
+        compact = compact @ self.weight_out
+        if self.output_width == self.channels:
+            output = compact
+        else:
+            output = features.new_zeros(features.shape)
+            output[..., : self.output_width] = compact
+        if self.extra.numel() > 0:
+            channel_scale = features.new_zeros(features.shape[-1])
+            indices = torch.arange(self.extra.numel(), device=features.device)
+            channel_scale.scatter_add_(0, indices.remainder(features.shape[-1]), self.extra)
+            output = output + features * channel_scale
+        return output
 
 
 def _round_attention_dim(channels: int, num_heads: int, ratio: float) -> int:
@@ -443,6 +510,10 @@ class SerializedPointROPEAttention(nn.Module):
         projection_dropout: float = 0.0,
         order: str = "z",
         patch_cache: SerializedPatchCache | None = None,
+        geometry_mode: str = "none",
+        geometry_signature_dim: int = 0,
+        geometry_relation_dim: int = 8,
+        geometry_hidden_dim: int = 0,
     ):
         super().__init__()
         if order not in _SUPPORTED_ORDERS:
@@ -463,11 +534,176 @@ class SerializedPointROPEAttention(nn.Module):
         self.attention_dropout = float(attention_dropout)
         self.rope_enabled = bool(rope_enabled)
         self.patch_cache = patch_cache
+        self.geometry_mode = str(geometry_mode).lower()
+        if self.geometry_mode not in _SUPPORTED_GEOMETRY_MODES:
+            raise ValueError(
+                "Unsupported geometry mode {!r}; expected one of {}".format(
+                    geometry_mode, sorted(_SUPPORTED_GEOMETRY_MODES)
+                )
+            )
+        self.geometry_signature_dim = int(geometry_signature_dim)
+        if self.geometry_mode != "none" and self.geometry_signature_dim <= 0:
+            raise ValueError("geometry_signature_dim must be positive when KTHA is enabled")
 
         self.qkv = nn.Linear(self.channels, 3 * self.attention_dim, bias=True)
         self.projection = nn.Linear(self.attention_dim, self.channels, bias=True)
         self.projection_dropout = nn.Dropout(projection_dropout)
         self.rope = PointROPE(base=rope_base)
+        self._diagnostics_enabled = False
+        self._diagnostic_max_queries = 256
+        self._last_diagnostics: dict[str, float | int | str] = {}
+
+        # Keep every candidate as an explicit residual over the L0 attention.
+        # Zero scales make warm-start checkpoint loading functionally identical
+        # while still allowing the scale itself to receive a first-step gradient.
+        self.ktha = None
+        if self.geometry_mode == "concat":
+            hidden = int(geometry_hidden_dim)
+            if hidden <= 0:
+                hidden = max(self.geometry_signature_dim, self.channels // 4)
+            self.ktha = nn.ModuleDict({
+                "feature_mlp": nn.Sequential(
+                    nn.Linear(self.channels + self.geometry_signature_dim, hidden),
+                    nn.GELU(),
+                    nn.Linear(hidden, self.channels),
+                ),
+                "feature_scale": nn.ParameterDict({
+                    "value": nn.Parameter(torch.zeros(())),
+                }),
+            })
+
+        elif self.geometry_mode == "matched_mlp":
+            # Match the default relation-bias candidate exactly, including its
+            # per-head zero-initialized scale, but consume semantic features only.
+            relation_dim = int(geometry_relation_dim)
+            if relation_dim <= 0:
+                raise ValueError("geometry_relation_dim must be positive")
+            reference_budget = (
+                2 * self.geometry_signature_dim * self.num_heads * relation_dim
+                + self.num_heads
+            )
+            self.ktha = nn.ModuleDict({
+                "feature_mlp": _ExactParameterBudgetMLP(
+                    self.channels, reference_budget - 1
+                ),
+                "feature_scale": nn.ParameterDict({
+                    "value": nn.Parameter(torch.zeros(())),
+                }),
+            })
+        elif self.geometry_mode == "qk":
+            self.ktha = nn.ModuleDict({
+                "qk_projection": nn.Linear(
+                    self.geometry_signature_dim, 2 * self.attention_dim, bias=False
+                ),
+                "q_scale": nn.ParameterDict({
+                    "value": nn.Parameter(torch.zeros(self.num_heads)),
+                }),
+                "k_scale": nn.ParameterDict({
+                    "value": nn.Parameter(torch.zeros(self.num_heads)),
+                }),
+            })
+        elif self.geometry_mode == "relation_bias":
+            relation_dim = int(geometry_relation_dim)
+            if relation_dim <= 0:
+                raise ValueError("geometry_relation_dim must be positive")
+            self.geometry_relation_dim = relation_dim
+            self.ktha = nn.ModuleDict({
+                "relation_q": nn.Linear(
+                    self.geometry_signature_dim,
+                    self.num_heads * relation_dim,
+                    bias=False,
+                ),
+                "relation_k": nn.Linear(
+                    self.geometry_signature_dim,
+                    self.num_heads * relation_dim,
+                    bias=False,
+                ),
+                "bias_scale": nn.ParameterDict({
+                    "value": nn.Parameter(torch.zeros(self.num_heads)),
+                }),
+            })
+
+    def set_diagnostics_mode(self, enabled: bool = True, max_queries: int = 256) -> None:
+        """Capture sampled attention statistics on subsequent forward passes."""
+
+        if max_queries < 1:
+            raise ValueError("max_queries must be positive")
+        self._diagnostics_enabled = bool(enabled)
+        self._diagnostic_max_queries = int(max_queries)
+        self._last_diagnostics = {}
+
+    def diagnostics(self) -> dict[str, float | int | str]:
+        return dict(self._last_diagnostics)
+
+    @torch.no_grad()
+    def _capture_attention_diagnostics(
+        self,
+        query: Tensor,
+        key: Tensor,
+        points: Tensor,
+        patch_indices: Tensor,
+        valid_mask: Tensor,
+        additive_mask: Tensor | None,
+    ) -> None:
+        valid_locations = torch.nonzero(valid_mask, as_tuple=False)
+        if valid_locations.shape[0] > self._diagnostic_max_queries:
+            sample_indices = torch.linspace(
+                0,
+                valid_locations.shape[0] - 1,
+                self._diagnostic_max_queries,
+                device=valid_locations.device,
+            ).round().long()
+            valid_locations = valid_locations[sample_indices]
+
+        patch_ids = valid_locations[:, 0]
+        token_ids = valid_locations[:, 1]
+        sampled_query = query[patch_ids, :, token_ids, :]
+        sampled_keys = key[patch_ids]
+        logits = torch.einsum("qhd,qhkd->qhk", sampled_query, sampled_keys)
+        logits = logits.float() / math.sqrt(query.shape[-1])
+        sampled_valid = valid_mask[patch_ids]
+        logits = logits.masked_fill(~sampled_valid[:, None, :], -torch.inf)
+        if additive_mask is not None:
+            logits = logits + additive_mask[patch_ids, :, token_ids, :].float()
+
+        weights = torch.softmax(logits, dim=-1)
+        entropy = -(weights * torch.log(weights.clamp_min(1e-12))).sum(dim=-1)
+        valid_key_count = sampled_valid.sum(dim=-1).clamp_min(1)
+        max_entropy = torch.log(valid_key_count.float()).clamp_min(1e-12)
+        normalized_entropy = entropy / max_entropy[:, None]
+        normalized_entropy = torch.where(
+            valid_key_count[:, None] > 1,
+            normalized_entropy,
+            torch.zeros_like(normalized_entropy),
+        )
+
+        patch_points = points[patch_indices[patch_ids]].float()
+        query_points = patch_points[
+            torch.arange(patch_points.shape[0], device=points.device), token_ids
+        ]
+        distances = torch.linalg.vector_norm(
+            patch_points - query_points[:, None, :], dim=-1
+        )
+        expected_distance = (weights * distances[:, None, :]).sum(dim=-1)
+
+        diagnostics: dict[str, float | int | str] = {
+            "order": self.order,
+            "query_count": int(valid_locations.shape[0]),
+            "head_observation_count": int(entropy.numel()),
+            "valid_key_count_mean": float(valid_key_count.float().mean().item()),
+        }
+        for prefix, values in (
+            ("entropy_nats", entropy),
+            ("entropy_normalized", normalized_entropy),
+            ("distance_m", expected_distance),
+        ):
+            diagnostics.update(
+                {
+                    "{}_{}".format(prefix, key): value
+                    for key, value in _distribution_summary(values).items()
+                }
+            )
+        self._last_diagnostics = diagnostics
 
     def forward(
         self,
@@ -475,6 +711,7 @@ class SerializedPointROPEAttention(nn.Module):
         features: Tensor,
         lengths: Tensor,
         voxel_size: float,
+        kernel_signature: Tensor | None = None,
     ) -> Tensor:
         if features.ndim != 2 or features.shape[1] != self.channels:
             raise ValueError(
@@ -486,6 +723,25 @@ class SerializedPointROPEAttention(nn.Module):
             raise ValueError("points and features must have the same packed length")
         if features.shape[0] == 0:
             return features
+        if self.geometry_mode != "none":
+            if kernel_signature is None:
+                raise ValueError("kernel_signature is required when KTHA is enabled")
+            expected = (features.shape[0], self.geometry_signature_dim)
+            if tuple(kernel_signature.shape) != expected:
+                raise ValueError(
+                    "kernel_signature must have shape {}, got {}".format(
+                        expected, tuple(kernel_signature.shape)
+                    )
+                )
+
+        if self.geometry_mode == "concat":
+            delta = self.ktha["feature_mlp"](
+                torch.cat([features, kernel_signature.to(features.dtype)], dim=-1)
+            )
+            features = features + self.ktha["feature_scale"]["value"] * delta
+        elif self.geometry_mode == "matched_mlp":
+            delta = self.ktha["feature_mlp"](features)
+            features = features + self.ktha["feature_scale"]["value"] * delta
 
         if self.patch_cache is None:
             patch_indices, valid_mask, grid_coords = build_serialized_patches(
@@ -505,6 +761,11 @@ class SerializedPointROPEAttention(nn.Module):
             )
 
         patch_features = features[patch_indices]
+        patch_signature = (
+            kernel_signature[patch_indices].to(patch_features.dtype)
+            if kernel_signature is not None
+            else None
+        )
         num_patches = patch_features.shape[0]
         qkv = self.qkv(patch_features)
         qkv = qkv.view(
@@ -519,17 +780,83 @@ class SerializedPointROPEAttention(nn.Module):
             query = self.rope(query, grid_coords)
             key = self.rope(key, grid_coords)
 
+        if self.geometry_mode == "qk":
+            qk_geometry = self.ktha["qk_projection"](patch_signature)
+            qk_geometry = qk_geometry.view(
+                num_patches,
+                self.patch_size,
+                2,
+                self.num_heads,
+                self.head_dim,
+            ).permute(2, 0, 3, 1, 4)
+            geometry_query, geometry_key = qk_geometry.unbind(dim=0)
+            q_scale = self.ktha["q_scale"]["value"].view(1, -1, 1, 1)
+            k_scale = self.ktha["k_scale"]["value"].view(1, -1, 1, 1)
+            query = query + q_scale * geometry_query
+            key = key + k_scale * geometry_key
+
         # SDPA bool masks use True for entries that participate in attention.
         attention_mask = valid_mask[:, None, None, :]
+        if self.geometry_mode == "relation_bias":
+            relation_q = self.ktha["relation_q"](patch_signature).view(
+                num_patches,
+                self.patch_size,
+                self.num_heads,
+                self.geometry_relation_dim,
+            ).permute(0, 2, 1, 3)
+            relation_k = self.ktha["relation_k"](patch_signature).view(
+                num_patches,
+                self.patch_size,
+                self.num_heads,
+                self.geometry_relation_dim,
+            ).permute(0, 2, 1, 3)
+            relation_bias = torch.matmul(
+                relation_q, relation_k.transpose(-1, -2)
+            ) / math.sqrt(self.geometry_relation_dim)
+            bias_scale = self.ktha["bias_scale"]["value"].view(1, -1, 1, 1)
+            attention_mask = relation_bias * bias_scale
+            attention_mask = attention_mask.masked_fill(
+                ~valid_mask[:, None, None, :], -torch.inf
+            )
+            # Flash-SDPA backward requires an aligned head stride when a dense
+            # additive mask is supplied.  The relation einsum/masked_fill path
+            # can otherwise leave a non-contiguous view on CUDA.
+            query = query.contiguous()
+            key = key.contiguous()
+            value = value.contiguous()
+            attention_mask = attention_mask.contiguous()
+        if self._diagnostics_enabled:
+            additive_mask = attention_mask if attention_mask.dtype != torch.bool else None
+            self._capture_attention_diagnostics(
+                query,
+                key,
+                points,
+                patch_indices,
+                valid_mask,
+                additive_mask,
+            )
         dropout_p = self.attention_dropout if self.training else 0.0
-        attended = F.scaled_dot_product_attention(
-            query,
-            key,
-            value,
-            attn_mask=attention_mask,
-            dropout_p=dropout_p,
-            is_causal=False,
-        )
+        if self.geometry_mode == "relation_bias":
+            # PyTorch 2.5 Flash-SDPA can fail in backward with a dense per-head
+            # additive mask ("LSE is not correctly aligned").  Patches are
+            # deliberately small, so use the equivalent explicit formulation
+            # for this candidate while retaining SDPA for all other modes.
+            logits = torch.matmul(query, key.transpose(-1, -2))
+            logits = logits / math.sqrt(self.head_dim)
+            probabilities = torch.softmax(logits + attention_mask, dim=-1)
+            probabilities = F.dropout(
+                probabilities, p=dropout_p, training=self.training
+            )
+            attended = torch.matmul(probabilities, value)
+        else:
+            attended = F.scaled_dot_product_attention(
+                query,
+                key,
+                value,
+                attn_mask=attention_mask,
+                dropout_p=dropout_p,
+                is_causal=False,
+            )
         attended = attended.transpose(1, 2).reshape(
             num_patches, self.patch_size, self.attention_dim
         )
@@ -566,6 +893,10 @@ class LitePointTransformerBlock(nn.Module):
         drop_path: float = 0.0,
         order: str = "z",
         patch_cache: SerializedPatchCache | None = None,
+        geometry_mode: str = "none",
+        geometry_signature_dim: int = 0,
+        geometry_relation_dim: int = 8,
+        geometry_hidden_dim: int = 0,
     ):
         super().__init__()
         if mlp_ratio <= 0:
@@ -591,6 +922,10 @@ class LitePointTransformerBlock(nn.Module):
             projection_dropout=projection_dropout,
             order=order,
             patch_cache=patch_cache,
+            geometry_mode=geometry_mode,
+            geometry_signature_dim=geometry_signature_dim,
+            geometry_relation_dim=geometry_relation_dim,
+            geometry_hidden_dim=geometry_hidden_dim,
         )
         self.norm2 = nn.LayerNorm(self.out_channels, eps=1e-6)
         hidden_channels = max(1, int(round(self.out_channels * mlp_ratio)))
@@ -602,6 +937,18 @@ class LitePointTransformerBlock(nn.Module):
             nn.Dropout(projection_dropout),
         )
         self.drop_path = DropPathPack(drop_path)
+        self._diagnostics_enabled = False
+        self._last_diagnostics: dict[str, object] = {}
+
+    def set_diagnostics_mode(self, enabled: bool = True, max_queries: int = 256) -> None:
+        self._diagnostics_enabled = bool(enabled)
+        self._last_diagnostics = {}
+        self.attention.set_diagnostics_mode(enabled, max_queries=max_queries)
+
+    def diagnostics(self) -> dict[str, object]:
+        diagnostics = dict(self._last_diagnostics)
+        diagnostics["attention"] = self.attention.diagnostics()
+        return diagnostics
 
     def forward(
         self,
@@ -611,14 +958,39 @@ class LitePointTransformerBlock(nn.Module):
         neighb_inds: Tensor,
         lengths: Tensor,
         upcut: Tensor | None = None,
+        kernel_signature: Tensor | None = None,
     ) -> Tuple[Tensor, Tensor | None]:
         del q_pts, neighb_inds  # Kept in the signature for KPNeXt block compatibility.
         features = self.input_projection(s_feats)
-        features = features + self.drop_path(
-            self.attention(s_pts, self.norm1(features), lengths, self.voxel_size),
+        block_input = features
+        attention_delta = self.drop_path(
+            self.attention(
+                s_pts,
+                self.norm1(features),
+                lengths,
+                self.voxel_size,
+                kernel_signature=kernel_signature,
+            ),
             lengths,
         )
-        features = features + self.drop_path(self.mlp(self.norm2(features)), lengths)
+        features = features + attention_delta
+        mlp_delta = self.drop_path(self.mlp(self.norm2(features)), lengths)
+        features = features + mlp_delta
+        if self._diagnostics_enabled:
+            denominator = torch.linalg.vector_norm(block_input.float(), dim=-1).clamp_min(1e-8)
+            self._last_diagnostics = {
+                "token_count": int(features.shape[0]),
+                "attention_residual_ratio": _distribution_summary(
+                    torch.linalg.vector_norm(attention_delta.float(), dim=-1) / denominator
+                ),
+                "mlp_residual_ratio": _distribution_summary(
+                    torch.linalg.vector_norm(mlp_delta.float(), dim=-1) / denominator
+                ),
+                "total_residual_ratio": _distribution_summary(
+                    torch.linalg.vector_norm((features - block_input).float(), dim=-1)
+                    / denominator
+                ),
+            }
         return features, upcut
 
 
@@ -638,6 +1010,7 @@ class LiteHandoverBlock(nn.Module):
         neighb_inds: Tensor,
         lengths: Tensor,
         upcut: Tensor | None = None,
+        kernel_signature: Tensor | None = None,
     ) -> Tuple[Tensor, Tensor | None]:
         features, next_upcut = self.convolution(
             q_pts,
@@ -654,6 +1027,7 @@ class LiteHandoverBlock(nn.Module):
             neighb_inds,
             lengths,
             upcut=None,
+            kernel_signature=kernel_signature,
         )
         return features, next_upcut
 

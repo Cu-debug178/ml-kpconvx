@@ -1272,7 +1272,9 @@ class SceneSegSampler(Sampler):
             self.N = dataset.cfg.test.max_steps_per_epoch
 
         # Only perform validation for a portion of the validation test at each epoch
-        if dataset.set =='validation' and dataset.data_sampler == 'regular':
+        if (dataset.set in ('validation', 'test')
+                and dataset.data_sampler == 'regular'
+                and getattr(dataset.cfg.train, 'validation_mode', 'partial') != 'full_identity'):
             reg_sampling_N = dataset.get_reg_sampling_size()
             self.N = min(self.N, int(np.ceil(reg_sampling_N * 0.67)))
             self.N = max(self.N, int(np.ceil(reg_sampling_N * 0.34)))

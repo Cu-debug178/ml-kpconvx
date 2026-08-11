@@ -21,6 +21,8 @@ from models.kpnext_blocks import KPNextResidualBlock, KPNextInvertedBlock, KPNex
 from models.fast_adapter import FastAdapterStack
 from models.litept_blocks import (LiteHandoverBlock, LitePointTransformerBlock,
                                   SerializedPatchCache, parse_serialization_orders)
+from models.ktha_blocks import (KernelOccupancySignature, pool_kernel_signature,
+                                shuffle_packed_signature)
 
 from utils.torch_pyramid import fill_pyramid
 
@@ -85,6 +87,28 @@ class KPNeXt(nn.Module):
         self.litept_light_decoder = bool(
             getattr(cfg.model, 'litept_light_decoder', False)
         )
+        self.litept_legacy_kpconvd_encoder = bool(
+            getattr(cfg.model, 'litept_legacy_kpconvd_encoder', False)
+        )
+        self.ktha_mode = str(getattr(cfg.model, 'ktha_mode', 'none')).lower()
+        self.ktha_enabled = self.ktha_mode != 'none'
+        self.ktha_source_stage = int(
+            getattr(cfg.model, 'ktha_source_stage', self.litept_conv_stages)
+        )
+        target_value = str(getattr(cfg.model, 'ktha_target_stages', '4'))
+        self.ktha_target_stages = tuple(
+            int(value.strip())
+            for value in target_value.split(',')
+            if value.strip()
+        )
+        self.ktha_relation_dim = int(getattr(cfg.model, 'ktha_relation_dim', 8))
+        self.ktha_hidden_dim = int(getattr(cfg.model, 'ktha_hidden_dim', 0))
+        self.ktha_shuffle_geometry = bool(
+            getattr(cfg.model, 'ktha_shuffle_geometry', False)
+        )
+        self.ktha_train_mode = str(
+            getattr(cfg.model, 'ktha_train_mode', 'joint')
+        ).lower()
         if self.litept_enabled:
             if self.kp_mode not in {'kpconvd', 'kpconvx'}:
                 raise ValueError(
@@ -107,6 +131,32 @@ class KPNeXt(nn.Module):
                 raise ValueError('litept_patch_size must be positive')
             if self.litept_light_decoder and self.task == 'cloud_segmentation':
                 self.add_decoder_layer = False
+        if self.ktha_enabled:
+            if not self.litept_enabled:
+                raise ValueError('KTHA requires litept_enabled=True')
+            if not self.share_kp:
+                raise ValueError('KTHA requires share_kp=True to reuse the exact KP basis')
+            if self.ktha_source_stage < 1 or self.ktha_source_stage >= self.num_layers:
+                raise ValueError('ktha_source_stage must precede at least one later stage')
+            if self.ktha_source_stage > self.litept_conv_stages:
+                raise ValueError('ktha_source_stage must be a KP convolution stage')
+            if not self.ktha_target_stages:
+                raise ValueError('ktha_target_stages must contain at least one stage')
+            if any(
+                stage <= self.ktha_source_stage or stage > self.num_layers
+                for stage in self.ktha_target_stages
+            ):
+                raise ValueError(
+                    'Every KTHA target stage must follow the source and exist in the encoder'
+                )
+            if any(
+                stage <= self.litept_conv_stages
+                and stage != self.litept_handover_stage
+                for stage in self.ktha_target_stages
+            ):
+                raise ValueError('Every KTHA target must contain token attention')
+            if self.ktha_train_mode not in {'joint', 'module_head'}:
+                raise ValueError("ktha_train_mode must be 'joint' or 'module_head'")
 
         # This context path is independent of the pyramid sampling method.
         self.fa_enabled = bool(getattr(cfg.model, 'fa_enabled', False))
@@ -212,6 +262,24 @@ class KPNeXt(nn.Module):
                     C, layer_C[l+1], conv_r, conv_sig, cfg,
                     use_mod=self._pool_uses_kernel_attention(use_conv))
                 setattr(self, 'pooling_{:d}'.format(layer), pooling_i)
+
+        self.ktha_signature = None
+        if self.ktha_enabled:
+            source_radius = self.first_radius * (
+                self.radius_scaling ** (self.ktha_source_stage - 1)
+            )
+            source_sigma = self.first_sigma * (
+                self.radius_scaling ** (self.ktha_source_stage - 1)
+            )
+            self.ktha_signature = KernelOccupancySignature(
+                shell_sizes=cfg.model.shell_sizes,
+                radius=source_radius,
+                sigma=source_sigma,
+                dimension=cfg.data.dim,
+                influence_mode=cfg.model.kp_influence,
+                fixed_kernel_points=cfg.model.kp_fixed,
+                kernel_points=self.shared_kp[self.ktha_source_stage - 1]["k_pts"],
+            )
 
         #####################
         # List Decoder blocks
@@ -320,6 +388,7 @@ class KPNeXt(nn.Module):
         self.l1 = nn.L1Loss()
 
         self._configure_fast_adapter_training()
+        self._configure_ktha_training()
         return
 
     def _configure_fast_adapter_training(self):
@@ -339,6 +408,20 @@ class KPNeXt(nn.Module):
         for parameter in self.head.parameters():
             parameter.requires_grad = True
 
+    def _configure_ktha_training(self):
+        """Freeze L0 while training only geometry consumers and the task head."""
+
+        if not self.ktha_enabled or self.ktha_train_mode == 'joint':
+            return
+        if self.fa_enabled and self.fa_train_mode != 'joint':
+            raise ValueError('FastAdapter-only and KTHA-only training cannot be combined')
+
+        for parameter in self.parameters():
+            parameter.requires_grad = False
+        for name, parameter in self.named_parameters():
+            if '.ktha.' in name or name.startswith('head.'):
+                parameter.requires_grad = True
+
     def train(self, mode=True):
         """Keep the frozen backbone, including BN statistics, in eval mode."""
 
@@ -348,6 +431,14 @@ class KPNeXt(nn.Module):
                 if child_name not in {'fast_adapter', 'head'}:
                     child_module.eval()
             self.fast_adapter.train(True)
+            self.head.train(True)
+        if mode and self.ktha_enabled and self.ktha_train_mode == 'module_head':
+            for child_name, child_module in self.named_children():
+                if child_name != 'head':
+                    child_module.eval()
+            for module_name, module in self.named_modules():
+                if module_name.endswith('.ktha'):
+                    module.train(True)
             self.head.train(True)
         return self
 
@@ -359,6 +450,8 @@ class KPNeXt(nn.Module):
         if layer == self.litept_handover_stage:
             return 'handover'
         if layer <= self.litept_conv_stages:
+            if self.litept_legacy_kpconvd_encoder:
+                return 'forced_kpconvd'
             return 'configured_conv'
         return 'attention'
 
@@ -366,6 +459,8 @@ class KPNeXt(nn.Module):
         """Keep LitePT pooling consistent with the explicitly selected kp_mode."""
 
         if self.litept_enabled:
+            if self.litept_legacy_kpconvd_encoder:
+                return False
             return self.kp_mode == 'kpconvx'
         return not original_use_conv
 
@@ -394,6 +489,14 @@ class KPNeXt(nn.Module):
         patch_cache = self._litept_patch_caches.setdefault(
             layer, SerializedPatchCache()
         )
+        geometry_mode = (
+            self.ktha_mode
+            if self.ktha_enabled and layer in self.ktha_target_stages
+            else 'none'
+        )
+        geometry_signature_dim = (
+            int(np.sum(cfg.model.shell_sizes)) if geometry_mode != 'none' else 0
+        )
 
         if stage_kind == 'attention':
             return LitePointTransformerBlock(
@@ -411,6 +514,10 @@ class KPNeXt(nn.Module):
                 drop_path=drop_path,
                 order=order,
                 patch_cache=patch_cache,
+                geometry_mode=geometry_mode,
+                geometry_signature_dim=geometry_signature_dim,
+                geometry_relation_dim=self.ktha_relation_dim,
+                geometry_hidden_dim=self.ktha_hidden_dim,
             )
 
         if stage_kind == 'handover':
@@ -434,6 +541,10 @@ class KPNeXt(nn.Module):
                 drop_path=drop_path,
                 order=order,
                 patch_cache=patch_cache,
+                geometry_mode=geometry_mode,
+                geometry_signature_dim=geometry_signature_dim,
+                geometry_relation_dim=self.ktha_relation_dim,
+                geometry_hidden_dim=self.ktha_hidden_dim,
             )
             return LiteHandoverBlock(convolution, attention)
 
@@ -674,6 +785,7 @@ class KPNeXt(nn.Module):
         #  ------ Encoder ------
 
         skip_feats = []
+        kernel_signature = None
         for layer in range(1, self.num_layers + 1):
 
             # Get layer blocks
@@ -686,8 +798,46 @@ class KPNeXt(nn.Module):
                     feats = block(batch.in_dict.points[l], batch.in_dict.points[l], feats, batch.in_dict.neighbors[l])
             else:
                 upcut = None
+                stage_kernel_signature = kernel_signature
+                if (
+                    stage_kernel_signature is not None
+                    and self.ktha_enabled
+                    and layer in self.ktha_target_stages
+                    and self.ktha_shuffle_geometry
+                ):
+                    stage_kernel_signature = shuffle_packed_signature(
+                        stage_kernel_signature,
+                        batch.in_dict.lengths[l],
+                    )
                 for block in block_list:
-                    feats, upcut = block(batch.in_dict.points[l], batch.in_dict.points[l], feats, batch.in_dict.neighbors[l], batch.in_dict.lengths[l], upcut=upcut)
+                    if isinstance(block, (LitePointTransformerBlock, LiteHandoverBlock)):
+                        block_signature = None
+                        if self.ktha_enabled and layer in self.ktha_target_stages:
+                            if stage_kernel_signature is None:
+                                raise RuntimeError(
+                                    'KTHA target reached before a kernel signature was produced'
+                                )
+                            block_signature = stage_kernel_signature
+                        feats, upcut = block(
+                            batch.in_dict.points[l],
+                            batch.in_dict.points[l],
+                            feats,
+                            batch.in_dict.neighbors[l],
+                            batch.in_dict.lengths[l],
+                            upcut=upcut,
+                            kernel_signature=block_signature,
+                        )
+                    else:
+                        feats, upcut = block(batch.in_dict.points[l], batch.in_dict.points[l], feats, batch.in_dict.neighbors[l], batch.in_dict.lengths[l], upcut=upcut)
+
+            if self.ktha_enabled and layer == self.ktha_source_stage:
+                cached_geometry = self.shared_kp[l] if self.share_kp else None
+                kernel_signature = self.ktha_signature(
+                    batch.in_dict.points[l],
+                    batch.in_dict.points[l],
+                    batch.in_dict.neighbors[l],
+                    cached_geometry=cached_geometry,
+                )
 
             # Compensate geometry before skip storage and downsampling.
             pre_adapter_features = feats
@@ -718,6 +868,10 @@ class KPNeXt(nn.Module):
                     feats = layer_pool(feats, batch.in_dict.pools[l])
                 else:
                     feats = layer_pool(batch.in_dict.points[l+1], batch.in_dict.points[l], feats, batch.in_dict.pools[l])
+                if kernel_signature is not None:
+                    kernel_signature = pool_kernel_signature(
+                        kernel_signature, batch.in_dict.pools[l]
+                    )
 
          
         if verbose:    
@@ -852,11 +1006,6 @@ class KPNeXt(nn.Module):
         correct = (predicted == target).sum().item()
 
         return correct / total
-
-
-
-
-
 
 
 

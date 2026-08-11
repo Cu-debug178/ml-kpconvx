@@ -1,3 +1,4 @@
+import math
 import os
 import sys
 import unittest
@@ -18,6 +19,8 @@ from models.litept_blocks import (  # noqa: E402
     build_serialized_patches,
     parse_serialization_orders,
 )
+from models.ktha_blocks import (KernelOccupancySignature, pool_kernel_signature,
+                                shuffle_packed_signature)  # noqa: E402
 
 
 class PointROPETests(unittest.TestCase):
@@ -134,6 +137,53 @@ class SerializationTests(unittest.TestCase):
 
 
 class AttentionTests(unittest.TestCase):
+
+    def test_opt_in_attention_diagnostics_report_entropy_and_distance(self):
+        torch.manual_seed(30)
+        points = torch.randn(12, 3)
+        features = torch.randn(12, 48)
+        lengths = torch.tensor([5, 7], dtype=torch.long)
+        attention = SerializedPointROPEAttention(
+            channels=48,
+            num_heads=2,
+            patch_size=4,
+            order="z",
+        ).eval()
+        attention.set_diagnostics_mode(True, max_queries=6)
+        attention(points, features, lengths, voxel_size=0.2)
+        diagnostics = attention.diagnostics()
+        self.assertEqual(diagnostics["query_count"], 6)
+        self.assertEqual(diagnostics["head_observation_count"], 12)
+        self.assertTrue(math.isfinite(diagnostics["entropy_normalized_mean"]))
+        self.assertGreaterEqual(diagnostics["entropy_normalized_mean"], 0.0)
+        self.assertLessEqual(diagnostics["entropy_normalized_mean"], 1.0 + 1e-6)
+        self.assertTrue(math.isfinite(diagnostics["distance_m_mean"]))
+        self.assertGreaterEqual(diagnostics["distance_m_mean"], 0.0)
+
+    def test_block_diagnostics_report_residual_ratios(self):
+        torch.manual_seed(29)
+        points = torch.randn(10, 3)
+        features = torch.randn(10, 48)
+        lengths = torch.tensor([4, 6], dtype=torch.long)
+        block = LitePointTransformerBlock(
+            in_channels=48,
+            out_channels=48,
+            voxel_size=0.2,
+            num_heads=2,
+            patch_size=4,
+            drop_path=0.0,
+        ).eval()
+        block.set_diagnostics_mode(True, max_queries=5)
+        block(points, points, features, torch.empty((10, 0), dtype=torch.long), lengths)
+        diagnostics = block.diagnostics()
+        self.assertEqual(diagnostics["token_count"], 10)
+        for key in (
+            "attention_residual_ratio",
+            "mlp_residual_ratio",
+            "total_residual_ratio",
+        ):
+            self.assertTrue(math.isfinite(diagnostics[key]["mean"]))
+            self.assertGreaterEqual(diagnostics[key]["mean"], 0.0)
 
     def test_variable_length_attention_forward_backward(self):
         torch.manual_seed(3)
@@ -254,6 +304,121 @@ class AttentionTests(unittest.TestCase):
         self.assertIs(returned_upcut, upcut)
         output.sum().backward()
         self.assertTrue(torch.isfinite(features.grad).all())
+
+
+class KernelGeometryHandoverTests(unittest.TestCase):
+
+    def test_occupancy_pool_and_room_shuffle_preserve_distributions(self):
+        torch.manual_seed(7)
+        points = torch.randn(9, 3) * 0.1
+        neighbors = torch.arange(9).unsqueeze(1).repeat(1, 3)
+        producer = KernelOccupancySignature(
+            shell_sizes=[1, 4],
+            radius=0.4,
+            sigma=0.3,
+            influence_mode="linear",
+        )
+        signature = producer(points, points, neighbors)
+        self.assertEqual(tuple(signature.shape), (9, 5))
+        self.assertTrue(torch.allclose(signature.sum(1), torch.ones(9), atol=1e-6))
+
+        pools = torch.tensor([[0, 1, 2], [3, 4, 5], [6, 7, 8]])
+        pooled = pool_kernel_signature(signature, pools)
+        self.assertEqual(tuple(pooled.shape), (3, 5))
+        self.assertTrue(torch.allclose(pooled.sum(1), torch.ones(3), atol=1e-6))
+
+        shuffled = shuffle_packed_signature(signature, torch.tensor([4, 5]))
+        self.assertTrue(
+            torch.allclose(
+                signature[:4].sort(dim=0).values,
+                shuffled[:4].sort(dim=0).values,
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                signature[4:].sort(dim=0).values,
+                shuffled[4:].sort(dim=0).values,
+            )
+        )
+
+    def test_occupancy_can_reuse_the_models_exact_kernel_basis(self):
+        kernel_points = torch.tensor(
+            [
+                [0.0, 0.0, 0.0],
+                [0.2, 0.0, 0.0],
+                [0.0, 0.2, 0.0],
+                [0.0, 0.0, 0.2],
+                [-0.2, 0.0, 0.0],
+            ]
+        )
+        producer = KernelOccupancySignature(
+            shell_sizes=[1, 4],
+            radius=0.4,
+            sigma=0.3,
+            kernel_points=kernel_points,
+        )
+        self.assertTrue(torch.equal(producer.kernel_points, kernel_points))
+
+    def test_all_ktha_candidates_are_identity_initialized_and_trainable(self):
+        torch.manual_seed(8)
+        points = torch.randn(11, 3)
+        features = torch.randn(11, 48)
+        lengths = torch.tensor([5, 6])
+        signature = torch.softmax(torch.randn(11, 5), dim=-1)
+        baseline = SerializedPointROPEAttention(
+            channels=48, num_heads=2, patch_size=4, geometry_mode="none"
+        )
+        baseline.eval()
+        expected = baseline(points, features, lengths, voxel_size=0.2)
+
+        for mode in ("concat", "qk", "relation_bias", "matched_mlp"):
+            with self.subTest(mode=mode):
+                candidate = SerializedPointROPEAttention(
+                    channels=48,
+                    num_heads=2,
+                    patch_size=4,
+                    geometry_mode=mode,
+                    geometry_signature_dim=5,
+                    geometry_relation_dim=3,
+                )
+                candidate.load_state_dict(baseline.state_dict(), strict=False)
+                candidate.eval()
+                actual = candidate(
+                    points,
+                    features,
+                    lengths,
+                    voxel_size=0.2,
+                    kernel_signature=signature,
+                )
+                self.assertTrue(torch.allclose(actual, expected, atol=2e-5, rtol=2e-5))
+
+                candidate.train()
+                candidate.zero_grad(set_to_none=True)
+                actual.square().mean().backward()
+                scale_grads = [
+                    parameter.grad
+                    for name, parameter in candidate.named_parameters()
+                    if "scale" in name
+                ]
+                self.assertTrue(any(grad is not None for grad in scale_grads))
+
+    def test_matched_mlp_has_relation_bias_parameter_budget(self):
+        kwargs = dict(
+            channels=192,
+            num_heads=8,
+            patch_size=8,
+            geometry_signature_dim=43,
+            geometry_relation_dim=8,
+        )
+        relation = SerializedPointROPEAttention(
+            geometry_mode="relation_bias", **kwargs
+        )
+        control = SerializedPointROPEAttention(
+            geometry_mode="matched_mlp", **kwargs
+        )
+        relation_parameters = sum(p.numel() for p in relation.ktha.parameters())
+        control_parameters = sum(p.numel() for p in control.ktha.parameters())
+        self.assertEqual(control_parameters, relation_parameters)
 
 
 if __name__ == "__main__":

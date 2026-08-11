@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 
 from tools.analyze_s3dis_difficulties import (  # noqa: E402
     hierarchy_attributes_for_batch,
+    infer_checkpoint_kp_mode,
     parse_gpu_compute_processes,
     run_compare,
     run_dataset_audit,
@@ -34,6 +35,23 @@ from utils.s3dis_diagnostics import (  # noqa: E402
 
 
 class GeometryDiagnosticTests(unittest.TestCase):
+
+    def test_checkpoint_kp_mode_detection_uses_modulation_parameters(self):
+        kpconvd_state = {"encoder_1.0.conv.weights": object()}
+        kpconvx_state = {
+            "encoder_1.0.conv.weights": object(),
+            "encoder_1.0.conv.alpha_mlp.0.weight": object(),
+        }
+        legacy_state = {
+            "encoder_1.0.conv.weights": object(),
+            "decoder_layer_1.conv.alpha_mlp.0.weight": object(),
+        }
+        self.assertEqual(infer_checkpoint_kp_mode(kpconvd_state), "kpconvd")
+        self.assertEqual(infer_checkpoint_kp_mode(kpconvx_state), "kpconvx")
+        self.assertEqual(
+            infer_checkpoint_kp_mode(legacy_state),
+            "legacy_kpconvd_encoder_kpconvx_decoder",
+        )
 
     def test_fixed_radius_density_boundary_and_pca(self):
         points = np.array(

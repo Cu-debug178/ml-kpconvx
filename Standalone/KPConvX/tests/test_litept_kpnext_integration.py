@@ -208,6 +208,19 @@ class KPNeXtLitePTIntegrationTests(unittest.TestCase):
         kpconvd_model = KPNeXt(kpconvd_cfg)
         self.assertIsInstance(kpconvd_model.pooling_1.conv, KPConvD)
 
+    def test_legacy_litept_layout_keeps_kpconvx_decoder_only(self):
+        cfg = _make_config("cloud_segmentation")
+        cfg.model.grid_pool = False
+        cfg.model.use_strided_conv = False
+        cfg.model.litept_light_decoder = False
+        cfg.model.litept_legacy_kpconvd_encoder = True
+        model = KPNeXt(cfg)
+        self.assertIsInstance(model.encoder_1[0].conv, KPConvD)
+        self.assertIsInstance(model.encoder_2[0].conv, KPConvD)
+        self.assertIsInstance(model.encoder_3[0].conv, KPConvD)
+        self.assertIsInstance(model.pooling_1.conv, KPConvD)
+        self.assertIsInstance(model.decoder_layer_1.conv, KPConvX)
+
     def test_non_litept_keeps_first_inv_layer_behavior(self):
         cfg = _make_config("classification")
         cfg.model.litept_enabled = False
@@ -238,6 +251,50 @@ class KPNeXtLitePTIntegrationTests(unittest.TestCase):
         ]
         self.assertTrue(any(grad is not None for grad in attention_grads))
         self.assertTrue(torch.isfinite(logits).all())
+
+    def test_ktha_candidates_run_end_to_end_with_identity_warm_start(self):
+        torch.manual_seed(12)
+        batch = _make_batch(input_channels=5)
+        baseline_cfg = _make_config("cloud_segmentation")
+        baseline = KPNeXt(baseline_cfg).eval()
+        baseline_logits = baseline(batch)
+
+        for mode in ("concat", "qk", "relation_bias", "matched_mlp"):
+            with self.subTest(mode=mode):
+                cfg = _make_config("cloud_segmentation")
+                cfg.model.ktha_mode = mode
+                cfg.model.ktha_source_stage = 3
+                cfg.model.ktha_target_stages = "4"
+                cfg.model.ktha_relation_dim = 3
+                candidate = KPNeXt(cfg)
+                self.assertTrue(
+                    torch.equal(
+                        candidate.ktha_signature.kernel_points,
+                        candidate.shared_kp[2]["k_pts"],
+                    )
+                )
+                candidate.load_state_dict(baseline.state_dict(), strict=False)
+                candidate.eval()
+                logits = candidate(batch)
+                self.assertTrue(
+                    torch.allclose(logits, baseline_logits, atol=3e-5, rtol=3e-5)
+                )
+                self.assertTrue(torch.isfinite(logits).all())
+
+    def test_ktha_module_head_mode_freezes_backbone(self):
+        cfg = _make_config("cloud_segmentation")
+        cfg.model.ktha_mode = "relation_bias"
+        cfg.model.ktha_train_mode = "module_head"
+        model = KPNeXt(cfg)
+        trainable = {
+            name for name, parameter in model.named_parameters()
+            if parameter.requires_grad
+        }
+        self.assertTrue(any(".ktha." in name for name in trainable))
+        self.assertTrue(any(name.startswith("head.") for name in trainable))
+        self.assertTrue(
+            all(".ktha." in name or name.startswith("head.") for name in trainable)
+        )
 
     def test_classification_handover_path(self):
         torch.manual_seed(11)

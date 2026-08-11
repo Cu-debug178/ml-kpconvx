@@ -113,6 +113,10 @@ python3 tools/analyze_s3dis_difficulties.py profile \
   --output_dir results/s3dis_diagnostics/baseline_profile
 ```
 
+多房间几何分析可用 `--geometry_workers 4` 按房间并行；worker 数过高会增加内存和
+数据盘争用。若用 `--max_pca_neighbors` 限制 PCA 邻居以换取速度，必须把该上限和邻居
+截断饱和率一起报告。
+
 默认会补算 full-resolution 固定半径密度、边界和局部 PCA，并将带几何属性的逐点文件
 缓存在输出目录的 `predictions_with_geometry/`。这一步可能耗时和占磁盘；如果导出文件
 已经包含所需属性，或只想看已有的 hierarchy 属性，可加 `--no-compute_geometry`。
@@ -129,6 +133,26 @@ python3 tools/analyze_s3dis_difficulties.py profile \
 
 `mIoU_present` 只平均该子集实际出现的类别，适合描述子集，但不能冒充标准 Area 5
 13 类 mIoU。必须同时查看 `point_count`、OA/error rate 和 confusion。
+
+### 固定房间 Stage-1 机制诊断
+
+在预测画像之外，可对固定房间运行 checkpoint 机制诊断：
+
+```bash
+python3 tools/diagnose_s3dis_stage1.py \
+  --log_path <BASELINE_LOG> \
+  --checkpoint <BASELINE_CHECKPOINT> \
+  --dataset_path <DATASET_PATH> \
+  --rooms_file <FIXED_ROOMS_FILE> \
+  --latency_repeats 3 \
+  --attention_queries 256 \
+  --output_dir results/s3dis_diagnostics/stage1_mechanism
+```
+
+该命令输出真实层级 token 数、CUDA-event latency、patch-KP edge overlap/cut、
+实际 KP basis occupancy entropy、error/entropy 相关、采样 attention entropy/distance，
+以及 Stage 2 到首个 attention stage 的 residual ratio。attention 权重只在诊断前向中
+对固定 query 子集显式重算，普通训练和 SDPA 推理路径不增加这项开销。
 
 ## 4. Baseline 与新模型成对比较
 

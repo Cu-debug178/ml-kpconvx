@@ -77,6 +77,11 @@ def main() -> int:
     weight_path = os.path.abspath(args.weight_path)
     cfg = load_cfg(log_path)
     cfg.data.path = os.path.abspath(args.dataset_path)
+    cfg.train.validation_mode = "full_identity"
+    # The L0 checkpoint is the legacy KPConvD encoder + KPConvX decoder
+    # variant used to initialize M3; retain that architecture for a strict
+    # same-protocol baseline evaluation.
+    cfg.model.litept_legacy_kpconvd_encoder = True
     cfg.test.batch_limit = 1
     cfg.test.in_radius = 100.0
     cfg.test.max_steps_per_epoch = 9999999

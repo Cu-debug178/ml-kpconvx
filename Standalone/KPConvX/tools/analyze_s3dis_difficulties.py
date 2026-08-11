@@ -16,6 +16,7 @@ import re
 import subprocess
 import sys
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -383,6 +384,7 @@ def prepare_profile_artifacts(
     pca_radius: float,
     chunk_size: int,
     max_pca_neighbors: int,
+    geometry_workers: int = 1,
 ) -> Dict[str, Path]:
     indexed = index_prediction_artifacts(prediction_dir)
     if not compute_geometry:
@@ -390,14 +392,53 @@ def prepare_profile_artifacts(
     required = set(geometry_attribute_names(radii))
     cache_dir = output_dir / "predictions_with_geometry"
     prepared = {}
+    pending = []
     for scene_name, source_path in indexed.items():
         artifact = load_prediction_artifact(source_path)
-        attributes = dict(artifact["attributes"])
-        missing = required.difference(attributes)
-        if not missing:
+        if not required.difference(artifact["attributes"]):
             prepared[scene_name] = source_path
             continue
-        computed = fixed_radius_geometry(
+        pending.append((scene_name, source_path))
+
+    worker_count = max(1, min(int(geometry_workers), len(pending) or 1))
+    tasks = [
+        (
+            scene_name,
+            str(source_path),
+            str(cache_dir / safe_scene_filename(scene_name)),
+            tuple(radii),
+            float(pca_radius),
+            int(chunk_size),
+            int(max_pca_neighbors),
+        )
+        for scene_name, source_path in pending
+    ]
+    if worker_count == 1:
+        results = map(compute_and_cache_geometry, tasks)
+    else:
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
+            results = executor.map(compute_and_cache_geometry, tasks)
+    for scene_name, cached_path in results:
+        prepared[scene_name] = Path(cached_path)
+    return prepared
+
+
+def compute_and_cache_geometry(task) -> Tuple[str, str]:
+    """Compute one room independently so profile geometry can use multiple CPU cores."""
+
+    (
+        scene_name,
+        source_path,
+        cached_path,
+        radii,
+        pca_radius,
+        chunk_size,
+        max_pca_neighbors,
+    ) = task
+    artifact = load_prediction_artifact(Path(source_path))
+    attributes = dict(artifact["attributes"])
+    attributes.update(
+        fixed_radius_geometry(
             artifact["points"],
             artifact["labels"],
             radii=radii,
@@ -405,20 +446,18 @@ def prepare_profile_artifacts(
             chunk_size=chunk_size,
             max_pca_neighbors=max_pca_neighbors,
         )
-        attributes.update(computed)
-        cached_path = cache_dir / safe_scene_filename(scene_name)
-        save_prediction_artifact(
-            cached_path,
-            scene_name,
-            artifact["points"],
-            artifact["labels"],
-            artifact["predictions"],
-            probabilities=artifact["probabilities"],
-            attributes=attributes,
-            metadata=artifact["metadata"],
-        )
-        prepared[scene_name] = cached_path
-    return prepared
+    )
+    save_prediction_artifact(
+        Path(cached_path),
+        scene_name,
+        artifact["points"],
+        artifact["labels"],
+        artifact["predictions"],
+        probabilities=artifact["probabilities"],
+        attributes=attributes,
+        metadata=artifact["metadata"],
+    )
+    return scene_name, cached_path
 
 
 def attribute_stream(indexed: Mapping[str, Path]) -> Iterable[Mapping[str, np.ndarray]]:
@@ -469,6 +508,7 @@ def run_profile(args: argparse.Namespace) -> None:
         args.pca_radius,
         args.geometry_chunk_size,
         args.max_pca_neighbors,
+        getattr(args, "geometry_workers", 1),
     )
     thresholds = estimate_quantile_thresholds(
         attribute_stream(indexed), seed=args.seed
@@ -482,6 +522,8 @@ def run_profile(args: argparse.Namespace) -> None:
     total_points = 0
     correct_points = 0
     coverage_states = []
+    pca_query_count = 0
+    pca_capped_count = 0
     for scene_name, path in indexed.items():
         artifact = load_prediction_artifact(path)
         coverage_states.append(
@@ -491,8 +533,17 @@ def run_profile(args: argparse.Namespace) -> None:
         )
         labels = artifact["labels"]
         predictions = artifact["predictions"]
+        attributes = artifact["attributes"]
+        if {
+            "pca_neighbor_count_full",
+            "pca_neighbor_count_used",
+        }.issubset(attributes):
+            pca_full = np.asarray(attributes["pca_neighbor_count_full"]).reshape(-1)
+            pca_used = np.asarray(attributes["pca_neighbor_count_used"]).reshape(-1)
+            pca_query_count += int(pca_full.size)
+            pca_capped_count += int(np.sum(pca_full > pca_used))
         masks = difficulty_masks(
-            artifact["attributes"], thresholds, point_count=labels.shape[0]
+            attributes, thresholds, point_count=labels.shape[0]
         )
         room_confusion = confusion_matrix(labels, predictions, class_count)
         overall_confusion += room_confusion
@@ -532,6 +583,12 @@ def run_profile(args: argparse.Namespace) -> None:
             "valid_point_count": total_points,
             "correct_point_count": correct_points,
             "compute_geometry": args.compute_geometry,
+            "geometry_workers": getattr(args, "geometry_workers", 1),
+            "max_pca_neighbors": args.max_pca_neighbors,
+            "pca_query_count": pca_query_count,
+            "pca_neighbor_cap_saturation_ratio": (
+                float(pca_capped_count / pca_query_count) if pca_query_count else None
+            ),
             "geometry_cache_created": (output_dir / "predictions_with_geometry").is_dir(),
             "coverage_states": sorted(set(coverage_states)),
             "warning": "Subset mIoU_present averages only represented classes. Use point counts and confusion together; do not compare tiny subsets as if they were full Area-5 mIoU.",
@@ -621,6 +678,7 @@ def run_compare(args: argparse.Namespace) -> None:
         args.pca_radius,
         args.geometry_chunk_size,
         args.max_pca_neighbors,
+        getattr(args, "geometry_workers", 1),
     )
     candidate_index = index_prediction_artifacts(
         Path(args.candidate_predictions).expanduser().resolve()
@@ -980,6 +1038,21 @@ def deterministic_inference_cfg(log_path: Path, dataset_path: Path, in_radius: f
     return cfg
 
 
+def infer_checkpoint_kp_mode(state_dict: Dict[str, object]) -> str:
+    """Infer the KP operator layout encoded by a KPNeXt checkpoint."""
+
+    modulation_keys = [
+        key
+        for key in state_dict
+        if ".conv.alpha_mlp." in key or ".conv.grpnorm." in key
+    ]
+    if any(key.startswith("encoder_") or key.startswith("pooling_") for key in modulation_keys):
+        return "kpconvx"
+    if any(key.startswith("decoder_layer_") for key in modulation_keys):
+        return "legacy_kpconvd_encoder_kpconvx_decoder"
+    return "kpconvd"
+
+
 def resolve_device(device_name: str):
     import torch
 
@@ -1067,14 +1140,31 @@ def run_infer(args: argparse.Namespace) -> None:
     cfg = deterministic_inference_cfg(log_path, dataset_path, args.in_radius)
     if cfg.model.kp_mode not in {"kpconvx", "kpconvd"}:
         raise ValueError("infer currently supports KPNeXt kpconvx/kpconvd logs")
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    model_state_dict = checkpoint["model_state_dict"]
+    recorded_kp_mode = cfg.model.kp_mode
+    effective_kp_mode = infer_checkpoint_kp_mode(model_state_dict)
+    if effective_kp_mode == "legacy_kpconvd_encoder_kpconvx_decoder":
+        cfg.model.litept_legacy_kpconvd_encoder = True
+        expected_recorded_mode = "kpconvx"
+    else:
+        cfg.model.kp_mode = effective_kp_mode
+        expected_recorded_mode = effective_kp_mode
+    kp_mode_mismatch = recorded_kp_mode != expected_recorded_mode or (
+        effective_kp_mode == "legacy_kpconvd_encoder_kpconvx_decoder"
+    )
+    if kp_mode_mismatch:
+        print(
+            "Warning: recorded kp_mode={} conflicts with checkpoint structure; "
+            "using {} for inference.".format(recorded_kp_mode, effective_kp_mode)
+        )
     if args.device != "cpu":
         refuse_gpu_contention_unless_allowed(args.allow_gpu_contention)
     device = resolve_device(args.device)
     dataset = S3DIRDataset(cfg, chosen_set="validation", precompute_pyramid=True)
     class_count = len(S3DIS_CLASS_NAMES)
     model = KPNeXt(cfg)
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+    model.load_state_dict(model_state_dict, strict=True)
     if int(model.num_logits) != class_count:
         raise ValueError(
             "checkpoint predicts {} classes, expected {} for S3DIS".format(
@@ -1312,6 +1402,9 @@ def run_infer(args: argparse.Namespace) -> None:
             "in_radius_m": args.in_radius,
             "capture_hierarchy": args.capture_hierarchy,
             "compute_geometry": args.compute_geometry,
+            "recorded_kp_mode": recorded_kp_mode,
+            "effective_kp_mode": effective_kp_mode,
+            "kp_mode_mismatch": kp_mode_mismatch,
             "note": "Prediction artifacts are full-resolution via dataset.test_proj. Check coverage.csv before profiling.",
         },
     )
@@ -1327,6 +1420,12 @@ def add_geometry_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=0,
         help="PCA neighbour cap; 0 keeps every point inside pca_radius",
+    )
+    parser.add_argument(
+        "--geometry_workers",
+        type=int,
+        default=1,
+        help="independent room workers for CPU geometry computation",
     )
 
 
@@ -1400,6 +1499,8 @@ def main() -> None:
     args = parser.parse_args()
     if hasattr(args, "votes") and args.votes < 1:
         parser.error("--votes must be positive")
+    if hasattr(args, "geometry_workers") and args.geometry_workers < 1:
+        parser.error("--geometry_workers must be positive")
     args.func(args)
 
 

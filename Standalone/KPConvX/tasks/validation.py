@@ -150,7 +150,7 @@ def cloud_segmentation_validation(
     
     underline('Validation epoch {:d}'.format(epoch))
     message =  '\n                                                          Timings        '
-    message += '\n Steps |   Votes   | GPU usage |      Speed      |   In   Batch  Forw  End '
+    message += '\n Steps |   Votes   | Mem usage |      Speed      |   In   Batch  Forw  End '
     message += '\n-------|-----------|-----------|-----------------|-------------------------'
     print(message)
 
@@ -302,6 +302,8 @@ def cloud_segmentation_validation(
             cuda_stats = torch.cuda.memory_stats(device)
             used_GPU_MB = cuda_stats["allocated_bytes.all.peak"]
             _, tot_GPU_MB = torch.cuda.mem_get_info(device)
+            # This is allocated-memory occupancy, not SM utilization.  Core
+            # utilization is sampled externally (for example with nvidia-smi).
             gpu_usage = 100 * used_GPU_MB / tot_GPU_MB
             torch.cuda.reset_peak_memory_stats(device)
         else:
@@ -798,8 +800,6 @@ def slam_segmentation_validation(epoch, net, val_loader, cfg, val_data, device, 
 
 def regression_validation(epoch, net, val_loader, cfg, val_data, device, debug=False):
     return
-
-
 
 
 

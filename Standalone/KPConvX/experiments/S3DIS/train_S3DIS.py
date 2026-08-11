@@ -159,6 +159,16 @@ def my_config():
     cfg.model.litept_projection_dropout = 0.0
     cfg.model.litept_orders = 'z,z-trans'
     cfg.model.litept_light_decoder = True
+    cfg.model.litept_legacy_kpconvd_encoder = False
+
+    # Kernel-to-Token Geometry Handover candidates for short warm-start screening.
+    cfg.model.ktha_mode = 'none'
+    cfg.model.ktha_source_stage = 3
+    cfg.model.ktha_target_stages = '4'
+    cfg.model.ktha_relation_dim = 8
+    cfg.model.ktha_hidden_dim = 0
+    cfg.model.ktha_shuffle_geometry = False
+    cfg.model.ktha_train_mode = 'joint'
 
     cfg.model.input_channels = 5    # This value has to be compatible with one of the dataset input features definition
     
@@ -276,6 +286,8 @@ def my_config():
     cfg.test.data_sampler = 'regular'       # 'regular' to pick spheres regularly accross the data.
 
     cfg.test.max_steps_per_epoch = 100       # Size of one validation epoch (should be small)
+    # A limit of 1 is a sentinel that stops packing after the first complete
+    # room fragment; it does not truncate that fragment to one point.
     cfg.test.batch_limit = 1
     cfg.test.batch_size = 1
 
@@ -358,6 +370,9 @@ def configure_validation_mode(cfg):
     # Identity validation uses every regular room center exactly once per epoch.
     cfg.test.data_sampler = 'regular'
     cfg.test.in_radius = 100.0
+    # One deterministic pass over every regular room center.  batch_limit=1
+    # packs one complete room fragment per item, so sampler size equals the
+    # number of covered room centers exactly.
     cfg.test.batch_limit = 1
     cfg.test.batch_size = 1
     cfg.test.max_steps_per_epoch = 9999999
@@ -399,7 +414,10 @@ if __name__ == '__main__':
                 'model.inv_act',
                 'model.fa_train_mode',
                 'model.fa_anchor_mode',
-                'model.litept_orders']
+                'model.litept_orders',
+                'model.ktha_mode',
+                'model.ktha_target_stages',
+                'model.ktha_train_mode']
 
     float_args = ['train.weight_decay',
                   'train.in_radius',
@@ -438,9 +456,12 @@ if __name__ == '__main__':
                 'model.fa_chunk_size',
                 'model.litept_conv_stages',
                 'model.litept_handover_stage',
-                'model.litept_patch_size',
-                'model.litept_num_heads',
-                'exp.seed']
+                 'model.litept_patch_size',
+                 'model.litept_num_heads',
+                 'model.ktha_source_stage',
+                 'model.ktha_relation_dim',
+                 'model.ktha_hidden_dim',
+                 'exp.seed']
 
     bool_args = ['train.monitor_enabled',
                  'train.amp_enabled',
@@ -466,6 +487,8 @@ if __name__ == '__main__':
                  'model.litept_enabled',
                  'model.litept_rope_enabled',
                  'model.litept_light_decoder',
+                 'model.litept_legacy_kpconvd_encoder',
+                 'model.ktha_shuffle_geometry',
                  'augment_train.height_norm']
 
     list_args = ['model.shell_sizes',
