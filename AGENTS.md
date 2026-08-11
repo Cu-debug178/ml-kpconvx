@@ -48,3 +48,22 @@
   `--help`, `--show`, `-c`, or dry-run forms), and never create an automatic
   poweroff watcher or put poweroff logic in an `EXIT` trap. Inspect such files
   only with read-only commands; instance power operations are console-only.
+
+## Experiment queue operations
+
+- Prefer launching queued jobs as foreground children of one queue runner. Use
+  each child's exit status plus an explicit artifact check to decide success.
+- When attaching a queue to an existing process, do not identify it by PID alone.
+  PID values can be reused, and `/proc/<pid>` can disappear between a check and a
+  read. Record the process start time from `/proc/<pid>/stat`, re-check identity,
+  and treat complete artifacts as the final completion evidence.
+- Independent experiments should record a failed job and continue. Save a
+  per-job log, exit code, timestamps, and a GPU/memory/disk diagnostic snapshot.
+  Use a consecutive-failure circuit breaker to stop systemic failures.
+- For dependent pipelines, use fail-fast or mark downstream jobs skipped when an
+  upstream artifact is unavailable. Do not run them against stale outputs.
+- Re-running a queue must skip verified successful jobs and preserve incomplete
+  result directories for diagnosis. Never overwrite or delete a failed run
+  automatically.
+- After detaching a queue, verify that its process survives the launching shell
+  and confirm that only the intended training job is using the GPU.
