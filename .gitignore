@@ -37,5 +37,8 @@ events.out.tfevents.*
 .finalize_shutdown/
 .scanobjectnn_full_pipeline*/
 
+# Temporary documents downloaded for local inspection
+/tmp/pdfs/
+
 # Generated kernel-point caches; existing tracked reference files are retained
 /Standalone/KPConvX/kernels/dispositions/k_*.ply
