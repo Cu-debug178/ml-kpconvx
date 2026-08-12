@@ -170,6 +170,17 @@ def my_config():
     cfg.model.ktha_shuffle_geometry = False
     cfg.model.ktha_train_mode = 'joint'
 
+    cfg.model.glskf_mode = 'none'
+    cfg.model.glskf_refine_stage = 3
+    cfg.model.glskf_context_stages = '4,5'
+    cfg.model.glskf_groups = 8
+    cfg.model.glskf_hidden_dim = 64
+    cfg.model.glskf_matched_hidden_dim = 0
+    cfg.model.glskf_detach_context = False
+    cfg.model.glskf_context_control = 'none'
+    cfg.model.glskf_deep_residual = False
+    cfg.model.glskf_train_mode = 'joint'
+
     cfg.model.input_channels = 5    # This value has to be compatible with one of the dataset input features definition
     
     # cfg.model.neighbor_limits = [10, 12, 12, 12, 12]      # Use empty list to let calibration get the values
@@ -417,7 +428,11 @@ if __name__ == '__main__':
                 'model.litept_orders',
                 'model.ktha_mode',
                 'model.ktha_target_stages',
-                'model.ktha_train_mode']
+                'model.ktha_train_mode',
+                'model.glskf_mode',
+                'model.glskf_context_stages',
+                'model.glskf_context_control',
+                'model.glskf_train_mode']
 
     float_args = ['train.weight_decay',
                   'train.in_radius',
@@ -461,6 +476,10 @@ if __name__ == '__main__':
                  'model.ktha_source_stage',
                  'model.ktha_relation_dim',
                  'model.ktha_hidden_dim',
+                 'model.glskf_refine_stage',
+                 'model.glskf_groups',
+                 'model.glskf_hidden_dim',
+                 'model.glskf_matched_hidden_dim',
                  'exp.seed']
 
     bool_args = ['train.monitor_enabled',
@@ -489,6 +508,8 @@ if __name__ == '__main__':
                  'model.litept_light_decoder',
                  'model.litept_legacy_kpconvd_encoder',
                  'model.ktha_shuffle_geometry',
+                 'model.glskf_detach_context',
+                 'model.glskf_deep_residual',
                  'augment_train.height_norm']
 
     list_args = ['model.shell_sizes',
