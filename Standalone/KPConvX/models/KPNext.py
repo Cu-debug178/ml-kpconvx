@@ -21,8 +21,12 @@ from models.kpnext_blocks import KPNextResidualBlock, KPNextInvertedBlock, KPNex
 from models.fast_adapter import FastAdapterStack
 from models.litept_blocks import (LiteHandoverBlock, LitePointTransformerBlock,
                                   SerializedPatchCache, parse_serialization_orders)
-from models.ktha_blocks import (KernelOccupancySignature, pool_kernel_signature,
-                                shuffle_packed_signature)
+from models.ktha_blocks import (SIGNATURE_ABLATION_MODES,
+                                KernelGeometrySignatureV2,
+                                KernelOccupancySignature,
+                                ablate_packed_signature,
+                                pool_kernel_geometry_signature_v2,
+                                pool_kernel_signature)
 
 from utils.torch_pyramid import fill_pyramid
 
@@ -92,6 +96,14 @@ class KPNeXt(nn.Module):
         )
         self.ktha_mode = str(getattr(cfg.model, 'ktha_mode', 'none')).lower()
         self.ktha_enabled = self.ktha_mode != 'none'
+        self.ktha_signature_v2 = self.ktha_mode in {
+            'pairwise_bias_v2',
+            'matched_mlp_v2',
+        }
+        kernel_count = int(np.sum(cfg.model.shell_sizes))
+        self.ktha_signature_dim = (
+            3 * kernel_count + 2 if self.ktha_signature_v2 else kernel_count
+        )
         self.ktha_source_stage = int(
             getattr(cfg.model, 'ktha_source_stage', self.litept_conv_stages)
         )
@@ -106,6 +118,23 @@ class KPNeXt(nn.Module):
         self.ktha_shuffle_geometry = bool(
             getattr(cfg.model, 'ktha_shuffle_geometry', False)
         )
+        self.ktha_signature_ablation = str(
+            getattr(cfg.model, 'ktha_signature_ablation', 'none')
+        ).strip().lower()
+        if self.ktha_signature_ablation not in SIGNATURE_ABLATION_MODES:
+            raise ValueError(
+                'ktha_signature_ablation must be one of {}; got {!r}'.format(
+                    SIGNATURE_ABLATION_MODES,
+                    self.ktha_signature_ablation,
+                )
+            )
+        if self.ktha_shuffle_geometry:
+            if self.ktha_signature_ablation != 'none':
+                raise ValueError(
+                    'ktha_shuffle_geometry cannot be combined with an explicit '
+                    'ktha_signature_ablation'
+                )
+            self.ktha_signature_ablation = 'shuffle'
         self.ktha_train_mode = str(
             getattr(cfg.model, 'ktha_train_mode', 'joint')
         ).lower()
@@ -271,7 +300,12 @@ class KPNeXt(nn.Module):
             source_sigma = self.first_sigma * (
                 self.radius_scaling ** (self.ktha_source_stage - 1)
             )
-            self.ktha_signature = KernelOccupancySignature(
+            signature_type = (
+                KernelGeometrySignatureV2
+                if self.ktha_signature_v2
+                else KernelOccupancySignature
+            )
+            self.ktha_signature = signature_type(
                 shell_sizes=cfg.model.shell_sizes,
                 radius=source_radius,
                 sigma=source_sigma,
@@ -495,7 +529,7 @@ class KPNeXt(nn.Module):
             else 'none'
         )
         geometry_signature_dim = (
-            int(np.sum(cfg.model.shell_sizes)) if geometry_mode != 'none' else 0
+            self.ktha_signature_dim if geometry_mode != 'none' else 0
         )
 
         if stage_kind == 'attention':
@@ -803,11 +837,12 @@ class KPNeXt(nn.Module):
                     stage_kernel_signature is not None
                     and self.ktha_enabled
                     and layer in self.ktha_target_stages
-                    and self.ktha_shuffle_geometry
+                    and self.ktha_signature_ablation != 'none'
                 ):
-                    stage_kernel_signature = shuffle_packed_signature(
+                    stage_kernel_signature = ablate_packed_signature(
                         stage_kernel_signature,
                         batch.in_dict.lengths[l],
+                        self.ktha_signature_ablation,
                     )
                 for block in block_list:
                     if isinstance(block, (LitePointTransformerBlock, LiteHandoverBlock)):
@@ -869,9 +904,14 @@ class KPNeXt(nn.Module):
                 else:
                     feats = layer_pool(batch.in_dict.points[l+1], batch.in_dict.points[l], feats, batch.in_dict.pools[l])
                 if kernel_signature is not None:
-                    kernel_signature = pool_kernel_signature(
-                        kernel_signature, batch.in_dict.pools[l]
-                    )
+                    if self.ktha_signature_v2:
+                        kernel_signature = pool_kernel_geometry_signature_v2(
+                            kernel_signature, batch.in_dict.pools[l]
+                        )
+                    else:
+                        kernel_signature = pool_kernel_signature(
+                            kernel_signature, batch.in_dict.pools[l]
+                        )
 
          
         if verbose:    
@@ -1006,8 +1046,5 @@ class KPNeXt(nn.Module):
         correct = (predicted == target).sum().item()
 
         return correct / total
-
-
-
 
 

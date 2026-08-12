@@ -168,6 +168,7 @@ def my_config():
     cfg.model.ktha_relation_dim = 8
     cfg.model.ktha_hidden_dim = 0
     cfg.model.ktha_shuffle_geometry = False
+    cfg.model.ktha_signature_ablation = 'none'
     cfg.model.ktha_train_mode = 'joint'
 
     cfg.model.input_channels = 5    # This value has to be compatible with one of the dataset input features definition
@@ -417,6 +418,7 @@ if __name__ == '__main__':
                 'model.litept_orders',
                 'model.ktha_mode',
                 'model.ktha_target_stages',
+                'model.ktha_signature_ablation',
                 'model.ktha_train_mode']
 
     float_args = ['train.weight_decay',

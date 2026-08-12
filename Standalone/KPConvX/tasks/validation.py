@@ -451,9 +451,10 @@ def cloud_segmentation_validation(
             # Save file
             labels = val_loader.dataset.input_labels[c_i]
 
-            write_ply(val_name,
-                      [points, sub_vote_preds, sub_preds, labels.astype(np.int32)],
-                      ['x', 'y', 'z', 'vote_pre', 'last_pre', 'class'])
+            if getattr(cfg.test, 'save_validation_clouds', True):
+                write_ply(val_name,
+                          [points, sub_vote_preds, sub_preds, labels.astype(np.int32)],
+                          ['x', 'y', 'z', 'vote_pre', 'last_pre', 'class'])
 
             # Get full groundtruth labels
             labels = val_loader.dataset.val_labels[c_i].astype(np.int32)
@@ -505,7 +506,12 @@ def cloud_segmentation_validation(
                 line += ''.join(' {:.6f}'.format(value) for value in cycle['ious'])
                 text_file.write(line + '\n')
 
-    return {'metric': float(mIoU), 'completed_cycles': completed_cycles}
+    return {
+        'metric': float(mIoU),
+        'ious': [float(value) for value in IoUs],
+        'confusion': np.asarray(sum_Confs).tolist(),
+        'completed_cycles': completed_cycles,
+    }
 
 
 def _record_validation_cycle_sample(
@@ -800,7 +806,6 @@ def slam_segmentation_validation(epoch, net, val_loader, cfg, val_data, device, 
 
 def regression_validation(epoch, net, val_loader, cfg, val_data, device, debug=False):
     return
-
 
 
 

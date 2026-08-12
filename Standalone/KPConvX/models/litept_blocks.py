@@ -32,7 +32,9 @@ _SUPPORTED_GEOMETRY_MODES = {
     "concat",
     "qk",
     "relation_bias",
+    "pairwise_bias_v2",
     "matched_mlp",
+    "matched_mlp_v2",
 }
 
 
@@ -590,6 +592,22 @@ class SerializedPointROPEAttention(nn.Module):
                     "value": nn.Parameter(torch.zeros(())),
                 }),
             })
+        elif self.geometry_mode == "matched_mlp_v2":
+            relation_dim = int(geometry_relation_dim)
+            if relation_dim <= 0:
+                raise ValueError("geometry_relation_dim must be positive")
+            reference_budget = (
+                self.geometry_signature_dim * self.num_heads * relation_dim
+                + self.num_heads * relation_dim
+            )
+            self.ktha = nn.ModuleDict({
+                "feature_mlp": _ExactParameterBudgetMLP(
+                    self.channels, reference_budget - 1
+                ),
+                "feature_scale": nn.ParameterDict({
+                    "value": nn.Parameter(torch.zeros(())),
+                }),
+            })
         elif self.geometry_mode == "qk":
             self.ktha = nn.ModuleDict({
                 "qk_projection": nn.Linear(
@@ -620,6 +638,33 @@ class SerializedPointROPEAttention(nn.Module):
                 ),
                 "bias_scale": nn.ParameterDict({
                     "value": nn.Parameter(torch.zeros(self.num_heads)),
+                }),
+            })
+        elif self.geometry_mode == "pairwise_bias_v2":
+            relation_dim = int(geometry_relation_dim)
+            if relation_dim <= 0:
+                raise ValueError("geometry_relation_dim must be positive")
+            self.geometry_relation_dim = relation_dim
+            # The projection consumes geometry only.  A zero-initialized final
+            # metric keeps L0 logits exactly unchanged while allowing the metric
+            # itself to receive a gradient on the first optimization step.
+            self.ktha = nn.ModuleDict({
+                "geometry_projection": nn.Sequential(
+                    nn.LayerNorm(
+                        self.geometry_signature_dim,
+                        elementwise_affine=False,
+                    ),
+                    nn.Linear(
+                        self.geometry_signature_dim,
+                        self.num_heads * relation_dim,
+                        bias=False,
+                    ),
+                    nn.GELU(),
+                ),
+                "pairwise_weight": nn.ParameterDict({
+                    "value": nn.Parameter(
+                        torch.zeros(self.num_heads, relation_dim)
+                    ),
                 }),
             })
 
@@ -664,7 +709,10 @@ class SerializedPointROPEAttention(nn.Module):
         sampled_valid = valid_mask[patch_ids]
         logits = logits.masked_fill(~sampled_valid[:, None, :], -torch.inf)
         if additive_mask is not None:
-            logits = logits + additive_mask[patch_ids, :, token_ids, :].float()
+            sampled_bias = additive_mask[patch_ids, :, token_ids, :].float()
+            logits = logits + sampled_bias
+        else:
+            sampled_bias = None
 
         weights = torch.softmax(logits, dim=-1)
         entropy = -(weights * torch.log(weights.clamp_min(1e-12))).sum(dim=-1)
@@ -692,6 +740,15 @@ class SerializedPointROPEAttention(nn.Module):
             "head_observation_count": int(entropy.numel()),
             "valid_key_count_mean": float(valid_key_count.float().mean().item()),
         }
+        if sampled_bias is not None:
+            finite_bias = sampled_bias[torch.isfinite(sampled_bias)]
+            if finite_bias.numel() > 0:
+                diagnostics["geometry_bias_rms"] = float(
+                    torch.sqrt(finite_bias.square().mean()).item()
+                )
+                diagnostics["geometry_bias_max_abs"] = float(
+                    finite_bias.abs().max().item()
+                )
         for prefix, values in (
             ("entropy_nats", entropy),
             ("entropy_normalized", normalized_entropy),
@@ -739,7 +796,7 @@ class SerializedPointROPEAttention(nn.Module):
                 torch.cat([features, kernel_signature.to(features.dtype)], dim=-1)
             )
             features = features + self.ktha["feature_scale"]["value"] * delta
-        elif self.geometry_mode == "matched_mlp":
+        elif self.geometry_mode in {"matched_mlp", "matched_mlp_v2"}:
             delta = self.ktha["feature_mlp"](features)
             features = features + self.ktha["feature_scale"]["value"] * delta
 
@@ -818,6 +875,42 @@ class SerializedPointROPEAttention(nn.Module):
             attention_mask = attention_mask.masked_fill(
                 ~valid_mask[:, None, None, :], -torch.inf
             )
+        elif self.geometry_mode == "pairwise_bias_v2":
+            geometry_embedding = self.ktha["geometry_projection"](
+                patch_signature
+            ).view(
+                num_patches,
+                self.patch_size,
+                self.num_heads,
+                self.geometry_relation_dim,
+            ).permute(0, 2, 1, 3)
+            # Removing the patch-constant component makes zero and room-mean
+            # signatures structural null interventions, not merely values the
+            # optimizer may learn to ignore.
+            geometry_embedding = geometry_embedding - geometry_embedding.mean(
+                dim=2, keepdim=True
+            )
+            pairwise_weight = self.ktha["pairwise_weight"]["value"].view(
+                1, self.num_heads, 1, self.geometry_relation_dim
+            )
+            weighted_embedding = geometry_embedding * pairwise_weight
+            weighted_norm = (
+                geometry_embedding.square() * pairwise_weight
+            ).sum(dim=-1)
+            cross_term = torch.matmul(
+                weighted_embedding,
+                geometry_embedding.transpose(-1, -2),
+            )
+            relation_bias = (
+                weighted_norm.unsqueeze(-1)
+                + weighted_norm.unsqueeze(-2)
+                - 2.0 * cross_term
+            ) / math.sqrt(self.geometry_relation_dim)
+            attention_mask = relation_bias.masked_fill(
+                ~valid_mask[:, None, None, :], -torch.inf
+            )
+
+        if self.geometry_mode in {"relation_bias", "pairwise_bias_v2"}:
             # Flash-SDPA backward requires an aligned head stride when a dense
             # additive mask is supplied.  The relation einsum/masked_fill path
             # can otherwise leave a non-contiguous view on CUDA.
@@ -836,7 +929,7 @@ class SerializedPointROPEAttention(nn.Module):
                 additive_mask,
             )
         dropout_p = self.attention_dropout if self.training else 0.0
-        if self.geometry_mode == "relation_bias":
+        if self.geometry_mode in {"relation_bias", "pairwise_bias_v2"}:
             # PyTorch 2.5 Flash-SDPA can fail in backward with a dense per-head
             # additive mask ("LSE is not correctly aligned").  Patches are
             # deliberately small, so use the equivalent explicit formulation

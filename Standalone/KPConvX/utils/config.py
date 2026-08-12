@@ -164,12 +164,13 @@ def init_cfg():
     cfg.model.litept_legacy_kpconvd_encoder = False # Bool, reproduce legacy KPConvD encoder checkpoints
 
     # Kernel-to-Token Geometry Handover (KTHA).  Disabled for baseline parity.
-    cfg.model.ktha_mode = 'none'                  # Str, none/concat/qk/relation_bias/matched_mlp
+    cfg.model.ktha_mode = 'none'                  # Str, none/concat/qk/relation_bias/pairwise_bias_v2/matched_mlp(_v2)
     cfg.model.ktha_source_stage = 3               # Int, 1-based KP signature producer stage
     cfg.model.ktha_target_stages = '4'            # Str, comma-separated 1-based attention stages
     cfg.model.ktha_relation_dim = 8               # Int, per-head low-rank relation width
     cfg.model.ktha_hidden_dim = 0                 # Int, concat/control hidden width; 0 selects automatically
     cfg.model.ktha_shuffle_geometry = False       # Bool, shuffle signatures inside each packed room
+    cfg.model.ktha_signature_ablation = 'none'    # Str, none/shuffle/zero/room_mean inference intervention
     cfg.model.ktha_train_mode = 'joint'           # Str, joint or module_head
 
     cfg.model.process_ratio = 1.0       # Float, ratio between the radius of processed volume and the radius of the input volume
@@ -252,6 +253,7 @@ def init_cfg():
     cfg.test.val_momentum = 0.95        # Float, momentum for averaging predictions during validation.
     cfg.test.test_momentum = 0.95       # Float, momentum for averaging predictions during test.
     cfg.test.chkp_idx = None            #   Int, index of the checkpoint used for test
+    cfg.test.save_validation_clouds = True  # Bool, write per-room validation PLY files
 
 
     # Augmentation parameters

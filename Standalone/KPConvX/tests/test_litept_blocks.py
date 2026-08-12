@@ -19,7 +19,11 @@ from models.litept_blocks import (  # noqa: E402
     build_serialized_patches,
     parse_serialization_orders,
 )
-from models.ktha_blocks import (KernelOccupancySignature, pool_kernel_signature,
+from models.ktha_blocks import (KernelGeometrySignatureV2,
+                                KernelOccupancySignature,
+                                ablate_packed_signature,
+                                pool_kernel_geometry_signature_v2,
+                                pool_kernel_signature,
                                 shuffle_packed_signature)  # noqa: E402
 
 
@@ -341,6 +345,41 @@ class KernelGeometryHandoverTests(unittest.TestCase):
             )
         )
 
+    def test_signature_ablations_are_room_local_and_shape_preserving(self):
+        signature = torch.tensor(
+            [
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [0.5, 0.5],
+                [0.2, 0.8],
+                [0.8, 0.2],
+            ]
+        )
+        lengths = torch.tensor([2, 3])
+
+        self.assertIs(ablate_packed_signature(signature, lengths, "none"), signature)
+        self.assertTrue(
+            torch.equal(
+                ablate_packed_signature(signature, lengths, "zero"),
+                torch.zeros_like(signature),
+            )
+        )
+        room_mean = ablate_packed_signature(signature, lengths, "room_mean")
+        self.assertTrue(torch.allclose(room_mean[:2], torch.tensor([[0.5, 0.5]]).repeat(2, 1)))
+        expected_second = signature[2:].mean(dim=0, keepdim=True).repeat(3, 1)
+        self.assertTrue(torch.allclose(room_mean[2:], expected_second))
+
+        torch.manual_seed(17)
+        shuffled = ablate_packed_signature(signature, lengths, "shuffle")
+        self.assertTrue(
+            torch.equal(
+                shuffled[:2].sort(dim=0).values,
+                signature[:2].sort(dim=0).values,
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "signature ablation mode"):
+            ablate_packed_signature(signature, lengths, "unknown")
+
     def test_occupancy_can_reuse_the_models_exact_kernel_basis(self):
         kernel_points = torch.tensor(
             [
@@ -359,6 +398,57 @@ class KernelGeometryHandoverTests(unittest.TestCase):
         )
         self.assertTrue(torch.equal(producer.kernel_points, kernel_points))
 
+    def test_v2_signature_preserves_mass_and_distance_channels(self):
+        points = torch.tensor(
+            [
+                [0.0, 0.0, 0.0],
+                [0.1, 0.0, 0.0],
+                [0.0, 0.1, 0.0],
+            ]
+        )
+        neighbors = torch.tensor(
+            [
+                [0, 1, 3],
+                [1, 0, 2],
+                [2, 0, 3],
+            ]
+        )
+        producer = KernelGeometrySignatureV2(
+            shell_sizes=[1, 4],
+            radius=0.4,
+            sigma=0.3,
+            influence_mode="linear",
+        )
+        signature = producer(points, points, neighbors)
+        self.assertEqual(tuple(signature.shape), (3, 17))
+        self.assertTrue(torch.isfinite(signature).all())
+        self.assertTrue(
+            torch.allclose(signature[:, :5].sum(1), torch.ones(3), atol=1e-6)
+        )
+        self.assertTrue(torch.all((signature[:, -2] >= 0) & (signature[:, -2] <= 1)))
+        self.assertTrue(torch.all((signature[:, -1] >= 0) & (signature[:, -1] <= 1)))
+        self.assertLess(float(signature[0, -2]), float(signature[1, -2]))
+
+        pools = torch.tensor([[0, 1], [2, 3]])
+        pooled = pool_kernel_geometry_signature_v2(signature, pools)
+        self.assertEqual(tuple(pooled.shape), (2, 17))
+        self.assertTrue(torch.isfinite(pooled).all())
+        self.assertGreater(float(pooled[0, -2]), 0.0)
+
+        influence, nearest_kernel, _ = producer._assign_geometry(
+            points, points, neighbors
+        )
+        cached = producer(
+            points,
+            points,
+            neighbors,
+            cached_geometry={
+                "infl_w": influence,
+                "neighb_1nn": nearest_kernel,
+            },
+        )
+        self.assertTrue(torch.allclose(cached, signature, atol=1e-6, rtol=1e-6))
+
     def test_all_ktha_candidates_are_identity_initialized_and_trainable(self):
         torch.manual_seed(8)
         points = torch.randn(11, 3)
@@ -371,7 +461,14 @@ class KernelGeometryHandoverTests(unittest.TestCase):
         baseline.eval()
         expected = baseline(points, features, lengths, voxel_size=0.2)
 
-        for mode in ("concat", "qk", "relation_bias", "matched_mlp"):
+        for mode in (
+            "concat",
+            "qk",
+            "relation_bias",
+            "pairwise_bias_v2",
+            "matched_mlp",
+            "matched_mlp_v2",
+        ):
             with self.subTest(mode=mode):
                 candidate = SerializedPointROPEAttention(
                     channels=48,
@@ -395,12 +492,102 @@ class KernelGeometryHandoverTests(unittest.TestCase):
                 candidate.train()
                 candidate.zero_grad(set_to_none=True)
                 actual.square().mean().backward()
-                scale_grads = [
+                ktha_grads = [
                     parameter.grad
                     for name, parameter in candidate.named_parameters()
-                    if "scale" in name
+                    if "ktha" in name
                 ]
-                self.assertTrue(any(grad is not None for grad in scale_grads))
+                self.assertTrue(any(grad is not None for grad in ktha_grads))
+                if mode == "pairwise_bias_v2":
+                    metric_grad = candidate.ktha["pairwise_weight"]["value"].grad
+                    self.assertIsNotNone(metric_grad)
+                    self.assertGreater(float(metric_grad.abs().sum()), 0.0)
+
+    def test_v2_pairwise_bias_has_no_semantic_or_constant_geometry_bypass(self):
+        torch.manual_seed(18)
+        points = torch.randn(11, 3)
+        features = torch.randn(11, 48)
+        lengths = torch.tensor([5, 6])
+        signature = torch.randn(11, 17)
+        baseline = SerializedPointROPEAttention(
+            channels=48,
+            num_heads=2,
+            patch_size=4,
+            geometry_mode="none",
+        ).eval()
+        candidate = SerializedPointROPEAttention(
+            channels=48,
+            num_heads=2,
+            patch_size=4,
+            geometry_mode="pairwise_bias_v2",
+            geometry_signature_dim=17,
+            geometry_relation_dim=3,
+        ).eval()
+        candidate.load_state_dict(baseline.state_dict(), strict=False)
+        with torch.no_grad():
+            candidate.ktha["pairwise_weight"]["value"].fill_(-0.5)
+        candidate.set_diagnostics_mode(True, max_queries=32)
+
+        expected = baseline(points, features, lengths, voxel_size=0.2)
+        actual = candidate(
+            points,
+            features,
+            lengths,
+            voxel_size=0.2,
+            kernel_signature=signature,
+        )
+        self.assertGreater(candidate.diagnostics()["geometry_bias_rms"], 0.0)
+        zeros = candidate(
+            points,
+            features,
+            lengths,
+            voxel_size=0.2,
+            kernel_signature=torch.zeros_like(signature),
+        )
+        self.assertEqual(candidate.diagnostics()["geometry_bias_rms"], 0.0)
+        constant = candidate(
+            points,
+            features,
+            lengths,
+            voxel_size=0.2,
+            kernel_signature=signature.mean(0, keepdim=True).expand_as(signature),
+        )
+        self.assertFalse(torch.allclose(actual, expected))
+        self.assertTrue(torch.allclose(zeros, expected, atol=2e-5, rtol=2e-5))
+        self.assertTrue(torch.allclose(constant, expected, atol=2e-5, rtol=2e-5))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_v2_pairwise_bias_supports_bfloat16_backward(self):
+        torch.manual_seed(19)
+        device = torch.device("cuda")
+        attention = SerializedPointROPEAttention(
+            channels=48,
+            num_heads=2,
+            patch_size=8,
+            geometry_mode="pairwise_bias_v2",
+            geometry_signature_dim=17,
+            geometry_relation_dim=3,
+        ).to(device).train()
+        points = torch.randn(12, 3, device=device)
+        features = torch.randn(12, 48, device=device, requires_grad=True)
+        lengths = torch.tensor([7, 5], device=device)
+        signature = torch.randn(12, 17, device=device)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            output = attention(
+                points,
+                features,
+                lengths,
+                voxel_size=0.2,
+                kernel_signature=signature,
+            )
+            loss = output.float().square().mean()
+        loss.backward()
+        self.assertTrue(torch.isfinite(output).all())
+        self.assertTrue(torch.isfinite(features.grad).all())
+        metric_grad = attention.ktha["pairwise_weight"]["value"].grad
+        self.assertIsNotNone(metric_grad)
+        self.assertTrue(torch.isfinite(metric_grad).all())
+        self.assertGreater(float(metric_grad.abs().sum()), 0.0)
 
     def test_matched_mlp_has_relation_bias_parameter_budget(self):
         kwargs = dict(
@@ -415,6 +602,24 @@ class KernelGeometryHandoverTests(unittest.TestCase):
         )
         control = SerializedPointROPEAttention(
             geometry_mode="matched_mlp", **kwargs
+        )
+        relation_parameters = sum(p.numel() for p in relation.ktha.parameters())
+        control_parameters = sum(p.numel() for p in control.ktha.parameters())
+        self.assertEqual(control_parameters, relation_parameters)
+
+    def test_v2_matched_mlp_has_exact_pairwise_bias_parameter_budget(self):
+        kwargs = dict(
+            channels=192,
+            num_heads=8,
+            patch_size=8,
+            geometry_signature_dim=131,
+            geometry_relation_dim=8,
+        )
+        relation = SerializedPointROPEAttention(
+            geometry_mode="pairwise_bias_v2", **kwargs
+        )
+        control = SerializedPointROPEAttention(
+            geometry_mode="matched_mlp_v2", **kwargs
         )
         relation_parameters = sum(p.numel() for p in relation.ktha.parameters())
         control_parameters = sum(p.numel() for p in control.ktha.parameters())

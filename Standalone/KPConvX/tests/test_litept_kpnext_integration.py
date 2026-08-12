@@ -259,7 +259,14 @@ class KPNeXtLitePTIntegrationTests(unittest.TestCase):
         baseline = KPNeXt(baseline_cfg).eval()
         baseline_logits = baseline(batch)
 
-        for mode in ("concat", "qk", "relation_bias", "matched_mlp"):
+        for mode in (
+            "concat",
+            "qk",
+            "relation_bias",
+            "pairwise_bias_v2",
+            "matched_mlp",
+            "matched_mlp_v2",
+        ):
             with self.subTest(mode=mode):
                 cfg = _make_config("cloud_segmentation")
                 cfg.model.ktha_mode = mode
@@ -273,6 +280,12 @@ class KPNeXtLitePTIntegrationTests(unittest.TestCase):
                         candidate.shared_kp[2]["k_pts"],
                     )
                 )
+                expected_signature_dim = (
+                    131
+                    if mode in {"pairwise_bias_v2", "matched_mlp_v2"}
+                    else 43
+                )
+                self.assertEqual(candidate.ktha_signature_dim, expected_signature_dim)
                 candidate.load_state_dict(baseline.state_dict(), strict=False)
                 candidate.eval()
                 logits = candidate(batch)
@@ -280,6 +293,43 @@ class KPNeXtLitePTIntegrationTests(unittest.TestCase):
                     torch.allclose(logits, baseline_logits, atol=3e-5, rtol=3e-5)
                 )
                 self.assertTrue(torch.isfinite(logits).all())
+
+    def test_ktha_signature_ablations_run_through_kpnext(self):
+        torch.manual_seed(13)
+        batch = _make_batch(input_channels=5)
+        true_cfg = _make_config("cloud_segmentation")
+        true_cfg.model.ktha_mode = "concat"
+        true_cfg.model.ktha_source_stage = 3
+        true_cfg.model.ktha_target_stages = "4"
+        true_model = KPNeXt(true_cfg).eval()
+        with torch.no_grad():
+            for name, parameter in true_model.named_parameters():
+                if name.endswith(".ktha.feature_scale.value"):
+                    parameter.fill_(0.25)
+        state = true_model.state_dict()
+        true_logits = true_model(batch)
+
+        outputs = {}
+        for ablation in ("zero", "room_mean"):
+            cfg = _make_config("cloud_segmentation")
+            cfg.model.ktha_mode = "concat"
+            cfg.model.ktha_source_stage = 3
+            cfg.model.ktha_target_stages = "4"
+            cfg.model.ktha_signature_ablation = ablation
+            candidate = KPNeXt(cfg).eval()
+            candidate.load_state_dict(state, strict=True)
+            outputs[ablation] = candidate(batch)
+            self.assertTrue(torch.isfinite(outputs[ablation]).all())
+
+        self.assertFalse(torch.allclose(true_logits, outputs["zero"]))
+        self.assertFalse(torch.allclose(outputs["zero"], outputs["room_mean"]))
+
+        invalid_cfg = _make_config("cloud_segmentation")
+        invalid_cfg.model.ktha_mode = "concat"
+        invalid_cfg.model.ktha_shuffle_geometry = True
+        invalid_cfg.model.ktha_signature_ablation = "zero"
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            KPNeXt(invalid_cfg)
 
     def test_ktha_module_head_mode_freezes_backbone(self):
         cfg = _make_config("cloud_segmentation")
