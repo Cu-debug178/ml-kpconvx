@@ -173,6 +173,18 @@ def init_cfg():
     cfg.model.ktha_signature_ablation = 'none'    # Str, none/shuffle/zero/room_mean inference intervention
     cfg.model.ktha_train_mode = 'joint'           # Str, joint or module_head
 
+    # Global-to-Local Semantic Kernel Feedback (GLSKF).  Disabled for baseline parity.
+    cfg.model.glskf_mode = 'none'                 # Str, none/film/kernel_gate/matched_mlp
+    cfg.model.glskf_refine_stage = 3              # Int, 1-based stage whose skip is corrected
+    cfg.model.glskf_context_stages = '4,5'        # Str, comma-separated 1-based deep context stages
+    cfg.model.glskf_groups = 8                    # Int, channel groups sharing one gate value
+    cfg.model.glskf_hidden_dim = 64               # Int, gate generator hidden width
+    cfg.model.glskf_matched_hidden_dim = 0        # Int, matched-control hidden width; 0 matches parameters
+    cfg.model.glskf_detach_context = False        # Bool, stop gradients flowing back into the deep stages
+    cfg.model.glskf_context_control = 'none'      # Str, none/shuffle/room_mean causal control
+    cfg.model.glskf_deep_residual = False         # Bool, also feed the deep context in as conv features
+    cfg.model.glskf_train_mode = 'joint'          # Str, joint or module_head
+
     cfg.model.process_ratio = 1.0       # Float, ratio between the radius of processed volume and the radius of the input volume
     cfg.model.n_frames = 1              #   Int, number of frames used (Specific to SLAM)
 

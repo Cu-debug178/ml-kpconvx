@@ -30,6 +30,40 @@ from models.generic_blocks import gather, index_select, radius_gaussian, local_m
 #
 
 
+def apply_kernel_gate(neighbors_weights: Tensor,
+                      kernel_gate: Tensor,
+                      neighbors_1nn: Tensor) -> Tensor:
+    """
+    Scale already-gathered depthwise kernel weights by a per-point gate.
+    Args:
+        neighbors_weights (Tensor): (M, H, C) weights gathered per neighbor.
+        kernel_gate (Tensor): (M, K, G) gate, one value per query point, kernel
+            point and channel group. C must be divisible by G.
+        neighbors_1nn (LongTensor): (M, H) nearest kernel point of each neighbor.
+    Returns:
+        gated_weights (Tensor): (M, H, C).
+
+    Channel grouping is contiguous (group(c) = c // (C // G)), unlike the
+    interleaved convention of KPConvX. Keeping it contiguous lets the gate
+    broadcast over a reshaped view instead of materializing an (M, K, C) tensor.
+    """
+
+    if kernel_gate.dim() != 3:
+        raise ValueError('kernel_gate must have shape (M, K, G)')
+    num_points, num_neighbors, channels = neighbors_weights.shape
+    if kernel_gate.shape[0] != num_points:
+        raise ValueError('kernel_gate and neighbors_weights disagree on point count')
+    groups = kernel_gate.shape[2]
+    if groups < 1 or channels % groups != 0:
+        raise ValueError('kernel_gate groups ({:d}) must divide the channel count ({:d})'.format(groups, channels))
+
+    gathered = torch.gather(kernel_gate,
+                            1,
+                            neighbors_1nn.unsqueeze(-1).expand(num_points, num_neighbors, groups))  # -> (M, H, G)
+    grouped = neighbors_weights.reshape(num_points, num_neighbors, groups, -1)
+    return (grouped * gathered.unsqueeze(-1)).reshape(num_points, num_neighbors, channels)
+
+
 class KPConvD(nn.Module):
 
     def __init__(self,
@@ -213,7 +247,8 @@ class KPConvD(nn.Module):
     def forward(self, q_pts: Tensor,
                 s_pts: Tensor,
                 s_feats: Tensor,
-                neighb_inds: Tensor) -> Tensor:
+                neighb_inds: Tensor,
+                kernel_gate: Tensor = None) -> Tensor:
         """
         KPConv forward.
         Args:
@@ -221,6 +256,10 @@ class KPConvD(nn.Module):
             s_points (Tensor): support points carrying input features (N, 3).
             s_feats (Tensor): input features values (N, C_in).
             neighb_inds (LongTensor): neighbor indices of query points among support points (M, H).
+            kernel_gate (Tensor=None): optional (M, K, G) multiplicative gate on the
+                effective kernel weights. The base weights are left untouched;
+                only the gathered temporary copy is scaled, so autograd and the
+                optimizer state are unaffected.
         Returns:
             q_feats (Tensor): output features carried by query points (M, C_out).
         """
@@ -237,6 +276,9 @@ class KPConvD(nn.Module):
 
         if self.influence_mode == 'mlp':
 
+            if kernel_gate is not None:
+                raise ValueError("kernel_gate needs nearest-kernel weights, not influence_mode='mlp'")
+
             # Generate geometric encodings
             neighbors_weights = self.delta_mlp(neighbors) # (M, H, 3) -> (M, H, C)
 
@@ -248,7 +290,16 @@ class KPConvD(nn.Module):
             # Apply influence weights
             if self.influence_mode != 'constant':
                 neighbors_weights *= influence_weights.unsqueeze(2)
-        
+
+            # Optional top-down semantic gate on the effective kernel weights
+            if kernel_gate is not None:
+                if kernel_gate.shape[1] != self.K:
+                    raise ValueError(
+                        'kernel_gate must provide {:d} kernel points, got {:d}'.format(
+                            self.K, kernel_gate.shape[1]))
+                neighbors_weights = apply_kernel_gate(
+                    neighbors_weights, kernel_gate, neighbors_1nn)
+
 
         if self.Cmid > 0:
 

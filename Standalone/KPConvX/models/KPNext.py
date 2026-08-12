@@ -27,6 +27,7 @@ from models.ktha_blocks import (SIGNATURE_ABLATION_MODES,
                                 ablate_packed_signature,
                                 pool_kernel_geometry_signature_v2,
                                 pool_kernel_signature)
+from models.glskf_blocks import GLSKF_CONTEXT_CONTROLS, GLSKF_MODES, GlskfFeedback
 
 from utils.torch_pyramid import fill_pyramid
 
@@ -138,6 +139,35 @@ class KPNeXt(nn.Module):
         self.ktha_train_mode = str(
             getattr(cfg.model, 'ktha_train_mode', 'joint')
         ).lower()
+
+        # Global-to-Local Semantic Kernel Feedback (GLSKF): top-down semantic
+        # modulation of a shallower stage's effective kernel weights.
+        self.glskf_mode = str(getattr(cfg.model, 'glskf_mode', 'none')).lower()
+        self.glskf_enabled = self.glskf_mode != 'none'
+        self.glskf_refine_stage = int(getattr(cfg.model, 'glskf_refine_stage', 3))
+        context_value = str(getattr(cfg.model, 'glskf_context_stages', '4,5'))
+        self.glskf_context_stages = tuple(
+            int(value.strip())
+            for value in context_value.split(',')
+            if value.strip()
+        )
+        self.glskf_groups = int(getattr(cfg.model, 'glskf_groups', 8))
+        self.glskf_hidden_dim = int(getattr(cfg.model, 'glskf_hidden_dim', 64))
+        self.glskf_matched_hidden_dim = int(
+            getattr(cfg.model, 'glskf_matched_hidden_dim', 0)
+        )
+        self.glskf_detach_context = bool(
+            getattr(cfg.model, 'glskf_detach_context', False)
+        )
+        self.glskf_context_control = str(
+            getattr(cfg.model, 'glskf_context_control', 'none')
+        ).lower()
+        self.glskf_deep_residual = bool(
+            getattr(cfg.model, 'glskf_deep_residual', False)
+        )
+        self.glskf_train_mode = str(
+            getattr(cfg.model, 'glskf_train_mode', 'joint')
+        ).lower()
         if self.litept_enabled:
             if self.kp_mode not in {'kpconvd', 'kpconvx'}:
                 raise ValueError(
@@ -186,6 +216,48 @@ class KPNeXt(nn.Module):
                 raise ValueError('Every KTHA target must contain token attention')
             if self.ktha_train_mode not in {'joint', 'module_head'}:
                 raise ValueError("ktha_train_mode must be 'joint' or 'module_head'")
+        if self.glskf_enabled:
+            if self.glskf_mode not in GLSKF_MODES:
+                raise ValueError('glskf_mode must be one of {}'.format(GLSKF_MODES))
+            if self.glskf_context_control not in GLSKF_CONTEXT_CONTROLS:
+                raise ValueError(
+                    'glskf_context_control must be one of {}'.format(GLSKF_CONTEXT_CONTROLS)
+                )
+            if self.ktha_enabled:
+                # Both directions of the loop would confound each other: a gain
+                # could come from forward geometry handover or backward semantic
+                # feedback and the experiment could not tell which.
+                raise ValueError('KTHA and GLSKF cannot be enabled in the same run')
+            if self.task != 'cloud_segmentation':
+                raise ValueError('GLSKF corrects a decoder skip, so it needs cloud_segmentation')
+            if not self.share_kp:
+                raise ValueError('GLSKF requires share_kp=True to reuse the refined stage neighborhood')
+            if cfg.model.kp_influence == 'mlp':
+                raise ValueError("GLSKF requires nearest-kernel weights, not kp_influence='mlp'")
+            if self.kp_mode == 'kpconv':
+                raise ValueError(
+                    "GLSKF requires the KPConvD-style nearest-kernel operator; "
+                    "kp_mode='kpconv' is not supported"
+                )
+            if not 1 <= self.glskf_refine_stage < self.num_layers:
+                raise ValueError('glskf_refine_stage must be a stage whose skip reaches the decoder')
+            if (
+                self.litept_enabled
+                and self.glskf_refine_stage > self.litept_conv_stages
+                and self.glskf_refine_stage != self.litept_handover_stage
+            ):
+                raise ValueError('glskf_refine_stage must contain a KP convolution')
+            if not self.glskf_context_stages:
+                raise ValueError('glskf_context_stages must contain at least one stage')
+            if any(
+                stage <= self.glskf_refine_stage or stage > self.num_layers
+                for stage in self.glskf_context_stages
+            ):
+                raise ValueError(
+                    'Every GLSKF context stage must follow the refined stage and exist in the encoder'
+                )
+            if self.glskf_train_mode not in {'joint', 'module_head'}:
+                raise ValueError("glskf_train_mode must be 'joint' or 'module_head'")
 
         # This context path is independent of the pyramid sampling method.
         self.fa_enabled = bool(getattr(cfg.model, 'fa_enabled', False))
@@ -315,6 +387,38 @@ class KPNeXt(nn.Module):
                 kernel_points=self.shared_kp[self.ktha_source_stage - 1]["k_pts"],
             )
 
+        self.glskf = None
+        if self.glskf_enabled:
+            refine_l = self.glskf_refine_stage - 1
+            refine_radius = self.first_radius * (
+                self.radius_scaling ** refine_l
+            )
+            refine_sigma = self.first_sigma * (
+                self.radius_scaling ** refine_l
+            )
+            self.glskf = GlskfFeedback(
+                refine_channels=adapter_channels[refine_l],
+                context_channels=[
+                    adapter_channels[stage - 1] for stage in self.glskf_context_stages
+                ],
+                shell_sizes=cfg.model.shell_sizes,
+                radius=refine_radius,
+                sigma=refine_sigma,
+                mode=self.glskf_mode,
+                groups=self.glskf_groups,
+                hidden_dim=self.glskf_hidden_dim,
+                matched_hidden_dim=self.glskf_matched_hidden_dim,
+                dimension=cfg.data.dim,
+                influence_mode=cfg.model.kp_influence,
+                fixed_kernel_points=cfg.model.kp_fixed,
+                norm_type=cfg.model.norm,
+                bn_momentum=cfg.model.bn_momentum,
+                shared_kp_data=self.shared_kp[refine_l],
+                detach_context=self.glskf_detach_context,
+                deep_residual=self.glskf_deep_residual,
+                context_control=self.glskf_context_control,
+            )
+
         #####################
         # List Decoder blocks
         #####################
@@ -423,6 +527,7 @@ class KPNeXt(nn.Module):
 
         self._configure_fast_adapter_training()
         self._configure_ktha_training()
+        self._configure_glskf_training()
         return
 
     def _configure_fast_adapter_training(self):
@@ -456,6 +561,20 @@ class KPNeXt(nn.Module):
             if '.ktha.' in name or name.startswith('head.'):
                 parameter.requires_grad = True
 
+    def _configure_glskf_training(self):
+        """Freeze L0 while training only the feedback module and the task head."""
+
+        if not self.glskf_enabled or self.glskf_train_mode == 'joint':
+            return
+        if self.fa_enabled and self.fa_train_mode != 'joint':
+            raise ValueError('FastAdapter-only and GLSKF-only training cannot be combined')
+
+        for parameter in self.parameters():
+            parameter.requires_grad = False
+        for name, parameter in self.named_parameters():
+            if name.startswith('glskf.') or name.startswith('head.'):
+                parameter.requires_grad = True
+
     def train(self, mode=True):
         """Keep the frozen backbone, including BN statistics, in eval mode."""
 
@@ -473,6 +592,12 @@ class KPNeXt(nn.Module):
             for module_name, module in self.named_modules():
                 if module_name.endswith('.ktha'):
                     module.train(True)
+            self.head.train(True)
+        if mode and self.glskf_enabled and self.glskf_train_mode == 'module_head':
+            for child_name, child_module in self.named_children():
+                if child_name not in {'glskf', 'head'}:
+                    child_module.eval()
+            self.glskf.train(True)
             self.head.train(True)
         return self
 
@@ -717,9 +842,12 @@ class KPNeXt(nn.Module):
             self.fast_adapter.set_diagnostics_mode(summary=enabled, full=False)
 
     def runtime_monitoring_stats(self):
-        if self.fast_adapter is None:
-            return {}
-        return self.fast_adapter.diagnostics()
+        stats = {}
+        if self.fast_adapter is not None:
+            stats.update(self.fast_adapter.diagnostics())
+        if self.glskf is not None and self.glskf.last_stats:
+            stats['glskf'] = dict(self.glskf.last_stats)
+        return stats
 
     def litept_serialization_profile(self):
         """Return serialization timings for the most recent forward pass."""
@@ -736,6 +864,49 @@ class KPNeXt(nn.Module):
             "layout_ms": sum(v["layout_ms"] for v in stages.values()),
             "total_ms": sum(v["total_ms"] for v in stages.values()),
         }
+
+    def _upsample_between_stages(self, feats, batch, from_l, to_l):
+        """Chain the decoder upsamplers from level ``from_l`` down to ``to_l``.
+
+        The pyramid only stores adjacent-level correspondences, so a stage-5
+        feature reaches stage 3 through two successive nearest upsamples.
+        """
+
+        for l in range(from_l - 1, to_l - 1, -1):
+            upsample = getattr(self, 'upsampling_{:d}'.format(l + 1))
+            if self.grid_pool:
+                feats = upsample(feats, batch.in_dict.upsamples[l])
+            else:
+                feats = upsample(feats, batch.in_dict.upsamples[l], batch.in_dict.up_distances[l])
+        return feats
+
+    def _apply_glskf(self, batch, skip_feats, deep_feats, diagnostics=False):
+        """Rewrite the refined stage skip with a top-down corrected version."""
+
+        refine_l = self.glskf_refine_stage - 1
+        context = None
+        if self.glskf_mode != 'matched_mlp':
+            context_parts = []
+            for stage in self.glskf_context_stages:
+                source_l = stage - 1
+                if stage == self.num_layers:
+                    stage_feats = deep_feats
+                else:
+                    stage_feats = skip_feats[source_l]
+                context_parts.append(
+                    self._upsample_between_stages(stage_feats, batch, source_l, refine_l)
+                )
+            context = torch.cat(context_parts, dim=1)
+
+        self.glskf.set_diagnostics(diagnostics)
+        skip_feats[refine_l] = self.glskf(
+            batch.in_dict.points[refine_l],
+            skip_feats[refine_l],
+            context,
+            batch.in_dict.neighbors[refine_l],
+            lengths=batch.in_dict.lengths[refine_l],
+        )
+        return skip_feats
 
     def forward(
         self,
@@ -926,6 +1097,18 @@ class KPNeXt(nn.Module):
             
         elif self.task == 'cloud_segmentation':
 
+            #  ------ Top-down semantic feedback ------
+
+            if self.glskf_enabled:
+                skip_feats = self._apply_glskf(
+                    batch,
+                    skip_feats,
+                    feats,
+                    diagnostics=self._runtime_monitoring_enabled or return_intermediates,
+                )
+                if return_intermediates:
+                    trace['glskf'] = dict(self.glskf.last_stats)
+
             #  ------ Decoder ------
 
             for layer in range(self.num_layers - 1, 0, -1):
@@ -1046,5 +1229,4 @@ class KPNeXt(nn.Module):
         correct = (predicted == target).sum().item()
 
         return correct / total
-
 
