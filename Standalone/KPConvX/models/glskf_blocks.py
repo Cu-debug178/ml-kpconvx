@@ -35,12 +35,21 @@ from models.kpnext_blocks import KPConvD, apply_kernel_gate
 
 GLSKF_MODES = ("none", "film", "kernel_gate", "matched_mlp")
 GLSKF_CONTEXT_CONTROLS = ("none", "shuffle", "room_mean")
+GLSKF_INFERENCE_ABLATIONS = (
+    "none",
+    "shuffle",
+    "room_mean",
+    "zero_context",
+    "neutral_gate",
+    "branch_off",
+)
 
 # ``apply_kernel_gate`` lives next to KPConvD (it manipulates gathered kernel
 # weights) but belongs to this mechanism, so it is re-exported here.
 __all__ = [
     "GLSKF_MODES",
     "GLSKF_CONTEXT_CONTROLS",
+    "GLSKF_INFERENCE_ABLATIONS",
     "GlskfFeedback",
     "apply_kernel_gate",
     "room_mean_broadcast",
@@ -109,11 +118,13 @@ class GlskfFeedback(nn.Module):
         detach_context: bool = False,
         deep_residual: bool = False,
         context_control: str = "none",
+        inference_ablation: str = "none",
     ):
         super().__init__()
 
         mode = str(mode).lower()
         context_control = str(context_control).lower()
+        inference_ablation = str(inference_ablation).lower()
         if mode not in GLSKF_MODES or mode == "none":
             raise ValueError(
                 "glskf_mode must be one of {}".format(GLSKF_MODES[1:])
@@ -122,6 +133,27 @@ class GlskfFeedback(nn.Module):
             raise ValueError(
                 "glskf_context_control must be one of {}".format(GLSKF_CONTEXT_CONTROLS)
             )
+        if inference_ablation not in GLSKF_INFERENCE_ABLATIONS:
+            raise ValueError(
+                "glskf_inference_ablation must be one of {}".format(
+                    GLSKF_INFERENCE_ABLATIONS
+                )
+            )
+        if context_control != "none" and inference_ablation != "none":
+            raise ValueError(
+                "training context control and inference ablation cannot be combined"
+            )
+        if (
+            inference_ablation in {"shuffle", "room_mean", "zero_context"}
+            and mode == "matched_mlp"
+        ):
+            raise ValueError(
+                "context interventions require a GLSKF mode that reads deep context"
+            )
+        if inference_ablation == "neutral_gate" and mode != "kernel_gate":
+            raise ValueError("neutral_gate is only defined for glskf_mode='kernel_gate'")
+        if inference_ablation == "neutral_gate" and deep_residual:
+            raise ValueError("neutral_gate requires glskf_deep_residual=False")
         if influence_mode == "mlp":
             raise ValueError("GLSKF needs nearest-kernel assignment, not kp_influence='mlp'")
         if deep_residual and mode != "kernel_gate":
@@ -140,6 +172,7 @@ class GlskfFeedback(nn.Module):
 
         self.mode = mode
         self.context_control = context_control
+        self.inference_ablation = inference_ablation
         self.detach_context = bool(detach_context)
         self.deep_residual = bool(deep_residual)
         self.refine_channels = int(refine_channels)
@@ -251,6 +284,10 @@ class GlskfFeedback(nn.Module):
     ) -> Tensor:
         """Return the corrected skip feature for the refined stage."""
 
+        self.last_stats = {}
+        if self.training and self.inference_ablation != "none":
+            raise RuntimeError("glskf_inference_ablation is evaluation-only")
+
         if refine_feats.shape[1] != self.refine_channels:
             raise ValueError(
                 "GLSKF expected {:d} refine channels, got {:d}".format(
@@ -258,7 +295,14 @@ class GlskfFeedback(nn.Module):
                 )
             )
         if refine_feats.shape[0] == 0:
-            self.last_stats = {}
+            return refine_feats
+        if self.inference_ablation == "branch_off":
+            if self._collect_stats:
+                self.last_stats = {
+                    "inference_ablation": "branch_off",
+                    "scale_abs_mean": self.scale.abs().mean().item(),
+                    "correction_ratio": 0.0,
+                }
             return refine_feats
 
         if self.mode == "matched_mlp":
@@ -273,13 +317,18 @@ class GlskfFeedback(nn.Module):
                     )
                 )
             gate_source = context_feats
-            if self.context_control != "none":
+            context_control = self.context_control
+            if self.inference_ablation in {"shuffle", "room_mean"}:
+                context_control = self.inference_ablation
+            if context_control != "none":
                 if lengths is None:
                     raise ValueError("context controls need packed cloud lengths")
-                if self.context_control == "shuffle":
+                if context_control == "shuffle":
                     gate_source = shuffle_packed_rows(gate_source, lengths)
                 else:
                     gate_source = room_mean_broadcast(gate_source, lengths)
+            elif self.inference_ablation == "zero_context":
+                gate_source = torch.zeros_like(gate_source)
             if self.detach_context:
                 gate_source = gate_source.detach()
 
@@ -288,7 +337,14 @@ class GlskfFeedback(nn.Module):
             gamma, beta = film.chunk(2, dim=1)
             correction = refine_feats * torch.tanh(gamma) + beta
         else:
-            gate = self.build_gate(gate_source)
+            if self.inference_ablation == "neutral_gate":
+                gate = torch.ones(
+                    (refine_feats.shape[0], self.num_kernels, self.groups),
+                    dtype=refine_feats.dtype,
+                    device=refine_feats.device,
+                )
+            else:
+                gate = self.build_gate(gate_source)
             conv_feats = refine_feats
             if self.in_mlp is not None:
                 conv_feats = self.in_mlp(
@@ -316,12 +372,13 @@ class GlskfFeedback(nn.Module):
                 delta = (scale.unsqueeze(0) * correction).float().norm()
                 self.last_stats["scale_abs_mean"] = self.scale.abs().mean().item()
                 self.last_stats["correction_ratio"] = (delta / base).item()
+                self.last_stats["inference_ablation"] = self.inference_ablation
         return refined
 
     def __repr__(self):
         return (
             "GlskfFeedback(mode: {:s}, C: {:d}, ctx: {:d}, K: {:d}, G: {:d}, "
-            "hidden: {:d}, control: {:s})".format(
+            "hidden: {:d}, control: {:s}, ablation: {:s})".format(
                 self.mode,
                 self.refine_channels,
                 self.context_width,
@@ -329,5 +386,6 @@ class GlskfFeedback(nn.Module):
                 self.groups,
                 self.gate_hidden,
                 self.context_control,
+                self.inference_ablation,
             )
         )

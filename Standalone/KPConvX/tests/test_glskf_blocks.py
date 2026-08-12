@@ -366,6 +366,57 @@ class GlskfFeedbackTests(unittest.TestCase):
         self.assertFalse(torch.allclose(output, refine))
         self.assertTrue(torch.isfinite(output).all())
 
+    def test_branch_off_is_strict_identity_after_training(self):
+        torch.manual_seed(81)
+        module = _make_feedback(inference_ablation="branch_off").eval()
+        with torch.no_grad():
+            module.scale.fill_(0.5)
+        points, refine, context, neighbors, lengths = _feedback_inputs()
+        output = module(points, refine, context, neighbors, lengths=lengths)
+        self.assertTrue(torch.equal(output, refine))
+
+    def test_zero_context_matches_an_explicit_zero_tensor(self):
+        torch.manual_seed(82)
+        ablated = _make_feedback(inference_ablation="zero_context").eval()
+        reference = _make_feedback().eval()
+        reference.load_state_dict(ablated.state_dict())
+        with torch.no_grad():
+            ablated.scale.fill_(0.4)
+            reference.scale.copy_(ablated.scale)
+        points, refine, context, neighbors, lengths = _feedback_inputs()
+        actual = ablated(points, refine, context, neighbors, lengths=lengths)
+        expected = reference(
+            points,
+            refine,
+            torch.zeros_like(context),
+            neighbors,
+            lengths=lengths,
+        )
+        self.assertTrue(torch.equal(actual, expected))
+
+    def test_neutral_gate_preserves_conv_branch_but_ignores_context(self):
+        torch.manual_seed(83)
+        module = _make_feedback(inference_ablation="neutral_gate").eval()
+        with torch.no_grad():
+            module.scale.fill_(0.5)
+        points, refine, context, neighbors, lengths = _feedback_inputs()
+        first = module(points, refine, context, neighbors, lengths=lengths)
+        second = module(
+            points,
+            refine,
+            torch.randn_like(context),
+            neighbors,
+            lengths=lengths,
+        )
+        self.assertTrue(torch.equal(first, second))
+        self.assertFalse(torch.equal(first, refine))
+
+    def test_inference_ablation_is_rejected_during_training(self):
+        module = _make_feedback(inference_ablation="branch_off").train()
+        points, refine, context, neighbors, lengths = _feedback_inputs()
+        with self.assertRaisesRegex(RuntimeError, "evaluation-only"):
+            module(points, refine, context, neighbors, lengths=lengths)
+
     def test_gate_shape_and_positive_range(self):
         torch.manual_seed(9)
         module = _make_feedback(groups=4)
@@ -473,6 +524,14 @@ class GlskfFeedbackTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _make_feedback(mode="matched_mlp", context_control="shuffle")
         with self.assertRaises(ValueError):
+            _make_feedback(inference_ablation="wrong")
+        with self.assertRaises(ValueError):
+            _make_feedback(context_control="shuffle", inference_ablation="zero_context")
+        with self.assertRaises(ValueError):
+            _make_feedback(mode="film", inference_ablation="neutral_gate")
+        with self.assertRaises(ValueError):
+            _make_feedback(deep_residual=True, inference_ablation="neutral_gate")
+        with self.assertRaises(ValueError):
             GlskfFeedback(
                 refine_channels=8,
                 context_channels=[],
@@ -576,6 +635,20 @@ class GlskfKPNeXtIntegrationTests(unittest.TestCase):
         self.assertFalse(model.encoder_1.training)
         self.assertFalse(model.stem.training)
         self.assertTrue(model.glskf.training)
+        self.assertTrue(model.head.training)
+
+    def test_head_only_control_freezes_everything_except_the_head(self):
+        cfg = _make_config()
+        cfg.model.glskf_train_mode = "head_only"
+        model = KPNeXt(cfg)
+        trainable = {
+            name for name, parameter in model.named_parameters()
+            if parameter.requires_grad
+        }
+        self.assertTrue(trainable)
+        self.assertTrue(all(name.startswith('head.') for name in trainable))
+        model.train()
+        self.assertFalse(model.encoder_1.training)
         self.assertTrue(model.head.training)
 
     def test_module_head_backward_leaves_the_backbone_without_grads(self):

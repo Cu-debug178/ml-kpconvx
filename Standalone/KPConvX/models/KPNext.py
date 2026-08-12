@@ -27,7 +27,12 @@ from models.ktha_blocks import (SIGNATURE_ABLATION_MODES,
                                 ablate_packed_signature,
                                 pool_kernel_geometry_signature_v2,
                                 pool_kernel_signature)
-from models.glskf_blocks import GLSKF_CONTEXT_CONTROLS, GLSKF_MODES, GlskfFeedback
+from models.glskf_blocks import (
+    GLSKF_CONTEXT_CONTROLS,
+    GLSKF_INFERENCE_ABLATIONS,
+    GLSKF_MODES,
+    GlskfFeedback,
+)
 
 from utils.torch_pyramid import fill_pyramid
 
@@ -162,6 +167,9 @@ class KPNeXt(nn.Module):
         self.glskf_context_control = str(
             getattr(cfg.model, 'glskf_context_control', 'none')
         ).lower()
+        self.glskf_inference_ablation = str(
+            getattr(cfg.model, 'glskf_inference_ablation', 'none')
+        ).lower()
         self.glskf_deep_residual = bool(
             getattr(cfg.model, 'glskf_deep_residual', False)
         )
@@ -216,6 +224,20 @@ class KPNeXt(nn.Module):
                 raise ValueError('Every KTHA target must contain token attention')
             if self.ktha_train_mode not in {'joint', 'module_head'}:
                 raise ValueError("ktha_train_mode must be 'joint' or 'module_head'")
+        if self.glskf_inference_ablation not in GLSKF_INFERENCE_ABLATIONS:
+            raise ValueError(
+                'glskf_inference_ablation must be one of {}'.format(
+                    GLSKF_INFERENCE_ABLATIONS
+                )
+            )
+        if not self.glskf_enabled and self.glskf_inference_ablation != 'none':
+            raise ValueError('glskf_inference_ablation requires GLSKF to be enabled')
+        if self.glskf_train_mode not in {'joint', 'module_head', 'head_only'}:
+            raise ValueError(
+                "glskf_train_mode must be 'joint', 'module_head', or 'head_only'"
+            )
+        if self.glskf_train_mode == 'module_head' and not self.glskf_enabled:
+            raise ValueError('glskf_train_mode=module_head requires GLSKF to be enabled')
         if self.glskf_enabled:
             if self.glskf_mode not in GLSKF_MODES:
                 raise ValueError('glskf_mode must be one of {}'.format(GLSKF_MODES))
@@ -256,8 +278,6 @@ class KPNeXt(nn.Module):
                 raise ValueError(
                     'Every GLSKF context stage must follow the refined stage and exist in the encoder'
                 )
-            if self.glskf_train_mode not in {'joint', 'module_head'}:
-                raise ValueError("glskf_train_mode must be 'joint' or 'module_head'")
 
         # This context path is independent of the pyramid sampling method.
         self.fa_enabled = bool(getattr(cfg.model, 'fa_enabled', False))
@@ -417,6 +437,7 @@ class KPNeXt(nn.Module):
                 detach_context=self.glskf_detach_context,
                 deep_residual=self.glskf_deep_residual,
                 context_control=self.glskf_context_control,
+                inference_ablation=self.glskf_inference_ablation,
             )
 
         #####################
@@ -564,7 +585,7 @@ class KPNeXt(nn.Module):
     def _configure_glskf_training(self):
         """Freeze L0 while training only the feedback module and the task head."""
 
-        if not self.glskf_enabled or self.glskf_train_mode == 'joint':
+        if self.glskf_train_mode == 'joint':
             return
         if self.fa_enabled and self.fa_train_mode != 'joint':
             raise ValueError('FastAdapter-only and GLSKF-only training cannot be combined')
@@ -572,7 +593,10 @@ class KPNeXt(nn.Module):
         for parameter in self.parameters():
             parameter.requires_grad = False
         for name, parameter in self.named_parameters():
-            if name.startswith('glskf.') or name.startswith('head.'):
+            if name.startswith('head.') or (
+                self.glskf_train_mode == 'module_head'
+                and name.startswith('glskf.')
+            ):
                 parameter.requires_grad = True
 
     def train(self, mode=True):
@@ -593,11 +617,15 @@ class KPNeXt(nn.Module):
                 if module_name.endswith('.ktha'):
                     module.train(True)
             self.head.train(True)
-        if mode and self.glskf_enabled and self.glskf_train_mode == 'module_head':
+        if mode and self.glskf_train_mode in {'module_head', 'head_only'}:
+            allowed = {'head'}
+            if self.glskf_train_mode == 'module_head':
+                allowed.add('glskf')
             for child_name, child_module in self.named_children():
-                if child_name not in {'glskf', 'head'}:
+                if child_name not in allowed:
                     child_module.eval()
-            self.glskf.train(True)
+            if self.glskf_train_mode == 'module_head':
+                self.glskf.train(True)
             self.head.train(True)
         return self
 
@@ -1229,4 +1257,3 @@ class KPNeXt(nn.Module):
         correct = (predicted == target).sum().item()
 
         return correct / total
-

@@ -182,8 +182,9 @@ def init_cfg():
     cfg.model.glskf_matched_hidden_dim = 0        # Int, matched-control hidden width; 0 matches parameters
     cfg.model.glskf_detach_context = False        # Bool, stop gradients flowing back into the deep stages
     cfg.model.glskf_context_control = 'none'      # Str, none/shuffle/room_mean causal control
+    cfg.model.glskf_inference_ablation = 'none'   # Str, none/shuffle/room_mean/zero_context/neutral_gate/branch_off
     cfg.model.glskf_deep_residual = False         # Bool, also feed the deep context in as conv features
-    cfg.model.glskf_train_mode = 'joint'          # Str, joint or module_head
+    cfg.model.glskf_train_mode = 'joint'          # Str, joint/module_head/head_only
 
     cfg.model.process_ratio = 1.0       # Float, ratio between the radius of processed volume and the radius of the input volume
     cfg.model.n_frames = 1              #   Int, number of frames used (Specific to SLAM)

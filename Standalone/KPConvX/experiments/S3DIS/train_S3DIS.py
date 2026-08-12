@@ -179,6 +179,7 @@ def my_config():
     cfg.model.glskf_matched_hidden_dim = 0
     cfg.model.glskf_detach_context = False
     cfg.model.glskf_context_control = 'none'
+    cfg.model.glskf_inference_ablation = 'none'
     cfg.model.glskf_deep_residual = False
     cfg.model.glskf_train_mode = 'joint'
 
@@ -434,6 +435,7 @@ if __name__ == '__main__':
                 'model.glskf_mode',
                 'model.glskf_context_stages',
                 'model.glskf_context_control',
+                'model.glskf_inference_ablation',
                 'model.glskf_train_mode']
 
     float_args = ['train.weight_decay',
@@ -736,6 +738,11 @@ if __name__ == '__main__':
     elif cfg.model.kp_mode.startswith('kpnext'):
         net = KPNeXt(cfg, modulated=modulated, deformable=False)
 
+
+    # Model variants consume different RNG values during initialization. Reset
+    # the streams before the first loader iterator so warm-start controls share
+    # identical worker/data sampling streams.
+    set_seed(cfg.exp.seed)
 
     # Show model size
     print()
