@@ -44,7 +44,7 @@ proc_start_ticks() {
     rest="${stat_line#*) }"
     [[ "${rest}" != "${stat_line}" ]] || return 1
     set -- ${rest}
-    printf '%s\n' "$20"
+    printf '%s\n' "${20}"
 }
 
 proc_matches_queue() {
