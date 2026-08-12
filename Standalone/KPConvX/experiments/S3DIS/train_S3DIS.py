@@ -183,6 +183,16 @@ def my_config():
     cfg.model.glskf_deep_residual = False
     cfg.model.glskf_train_mode = 'joint'
 
+    cfg.model.dks_mode = 'none'
+    cfg.model.dks_stages = '3'
+    cfg.model.dks_hidden_dim = 32
+    cfg.model.dks_alpha_min = 0.5
+    cfg.model.dks_alpha_max = 1.2
+    cfg.model.dks_fixed_alpha = 1.0
+    cfg.model.dks_inference_ablation = 'none'
+    cfg.model.dks_train_mode = 'joint'
+    cfg.model.dks_log_stats = True
+
     cfg.model.input_channels = 5    # This value has to be compatible with one of the dataset input features definition
     
     # cfg.model.neighbor_limits = [10, 12, 12, 12, 12]      # Use empty list to let calibration get the values
@@ -436,7 +446,11 @@ if __name__ == '__main__':
                 'model.glskf_context_stages',
                 'model.glskf_context_control',
                 'model.glskf_inference_ablation',
-                'model.glskf_train_mode']
+                'model.glskf_train_mode',
+                'model.dks_mode',
+                'model.dks_stages',
+                'model.dks_inference_ablation',
+                'model.dks_train_mode']
 
     float_args = ['train.weight_decay',
                   'train.in_radius',
@@ -454,6 +468,9 @@ if __name__ == '__main__':
                   'model.litept_rope_base',
                   'model.litept_attention_dropout',
                   'model.litept_projection_dropout',
+                  'model.dks_alpha_min',
+                  'model.dks_alpha_max',
+                  'model.dks_fixed_alpha',
                   'augment_train.mix3D']
 
     int_args = ['model.conv_groups',
@@ -484,6 +501,7 @@ if __name__ == '__main__':
                  'model.glskf_groups',
                  'model.glskf_hidden_dim',
                  'model.glskf_matched_hidden_dim',
+                 'model.dks_hidden_dim',
                  'exp.seed']
 
     bool_args = ['train.monitor_enabled',
@@ -514,6 +532,7 @@ if __name__ == '__main__':
                  'model.ktha_shuffle_geometry',
                  'model.glskf_detach_context',
                  'model.glskf_deep_residual',
+                 'model.dks_log_stats',
                  'augment_train.height_norm']
 
     list_args = ['model.shell_sizes',

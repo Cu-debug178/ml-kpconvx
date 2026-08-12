@@ -69,7 +69,12 @@ def main() -> int:
             "true_minus_branch_off_pct_point": float(results["true"]["miou_pct"]) - float(results["branch_off"]["miou_pct"]),
         },
         "ranking_by_miou": sorted(MODES, key=lambda mode: float(results[mode]["miou_pct"]), reverse=True),
-        "interpretation_note": "Single-checkpoint contrasts are descriptive and do not estimate seed variance.",
+        "interpretation_note": (
+            "The six GLSKF modes are same-checkpoint descriptive contrasts and do not "
+            "estimate seed variance. Baseline is a separate external L0 checkpoint; "
+            "true-minus-baseline is a performance reference, not a single-variable "
+            "causal contrast."
+        ),
     }
     path = root / "summary.json"
     temporary = path.with_suffix(".json.tmp")

@@ -273,18 +273,25 @@ def pool_kernel_geometry_signature_v2(
 
 
 def shuffle_packed_signature(signature: Tensor, lengths: Tensor) -> Tensor:
-    """Randomly permute geometry within each packed room, preserving its marginal."""
+    """Permute geometry within each packed cloud without advancing global RNG."""
 
     shuffled = torch.empty_like(signature)
     start = 0
-    for length in lengths.detach().cpu().tolist():
-        length = int(length)
-        if length > 0:
-            permutation = torch.randperm(length, device=signature.device)
-            shuffled[start : start + length] = signature[
-                start : start + length
-            ][permutation]
-        start += length
+    cuda_devices = []
+    if signature.is_cuda:
+        device_index = signature.device.index
+        if device_index is None:
+            device_index = torch.cuda.current_device()
+        cuda_devices = [device_index]
+    with torch.random.fork_rng(devices=cuda_devices):
+        for length in lengths.detach().cpu().tolist():
+            length = int(length)
+            if length > 0:
+                permutation = torch.randperm(length, device=signature.device)
+                shuffled[start : start + length] = signature[
+                    start : start + length
+                ][permutation]
+            start += length
     if start != signature.shape[0]:
         raise ValueError("sum(lengths) must match signature rows")
     return shuffled

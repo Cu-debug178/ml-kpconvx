@@ -166,7 +166,9 @@ def train_and_validate(net, training_loader, val_loader, cfg, chkp_path=None, fi
                 checkpoint['model_state_dict'],
                 strict=False,
             )
-            allowed_new_prefixes = ('fast_adapter.', 'ktha_signature.', 'glskf.')
+            allowed_new_prefixes = (
+                'fast_adapter.', 'ktha_signature.', 'glskf.', 'dks.'
+            )
             missing_non_adapter = [
                 key for key in incompatible.missing_keys
                 if not key.startswith(allowed_new_prefixes) and '.ktha.' not in key

@@ -33,6 +33,11 @@ from models.glskf_blocks import (
     GLSKF_MODES,
     GlskfFeedback,
 )
+from models.dks_blocks import (
+    DKS_ABLATIONS,
+    DKS_MODES,
+    DynamicKernelScale,
+)
 
 from utils.torch_pyramid import fill_pyramid
 
@@ -176,6 +181,28 @@ class KPNeXt(nn.Module):
         self.glskf_train_mode = str(
             getattr(cfg.model, 'glskf_train_mode', 'joint')
         ).lower()
+
+        # Dynamic Kernel Scale (DKS): bottom-up per-point isotropic scaling of
+        # the centred coordinates used by selected KPConv stages.
+        self.dks_mode = str(getattr(cfg.model, 'dks_mode', 'none')).strip().lower()
+        self.dks_enabled = self.dks_mode != 'none'
+        dks_stage_value = str(getattr(cfg.model, 'dks_stages', '3'))
+        self.dks_stages = tuple(
+            int(value.strip())
+            for value in dks_stage_value.split(',')
+            if value.strip()
+        )
+        self.dks_hidden_dim = int(getattr(cfg.model, 'dks_hidden_dim', 32))
+        self.dks_alpha_min = float(getattr(cfg.model, 'dks_alpha_min', 0.5))
+        self.dks_alpha_max = float(getattr(cfg.model, 'dks_alpha_max', 1.2))
+        self.dks_fixed_alpha = float(getattr(cfg.model, 'dks_fixed_alpha', 1.0))
+        self.dks_inference_ablation = str(
+            getattr(cfg.model, 'dks_inference_ablation', 'none')
+        ).strip().lower()
+        self.dks_train_mode = str(
+            getattr(cfg.model, 'dks_train_mode', 'joint')
+        ).strip().lower()
+        self.dks_log_stats = bool(getattr(cfg.model, 'dks_log_stats', True))
         if self.litept_enabled:
             if self.kp_mode not in {'kpconvd', 'kpconvx'}:
                 raise ValueError(
@@ -278,6 +305,42 @@ class KPNeXt(nn.Module):
                 raise ValueError(
                     'Every GLSKF context stage must follow the refined stage and exist in the encoder'
                 )
+        if self.dks_mode not in DKS_MODES:
+            raise ValueError('dks_mode must be one of {}'.format(DKS_MODES))
+        if self.dks_inference_ablation not in DKS_ABLATIONS:
+            raise ValueError(
+                'dks_inference_ablation must be one of {}'.format(DKS_ABLATIONS)
+            )
+        if not self.dks_enabled and self.dks_inference_ablation != 'none':
+            raise ValueError('dks_inference_ablation requires DKS to be enabled')
+        if self.dks_train_mode not in {'joint', 'module_head', 'head_only'}:
+            raise ValueError(
+                "dks_train_mode must be 'joint', 'module_head', or 'head_only'"
+            )
+        if self.dks_train_mode == 'module_head' and not self.dks_enabled:
+            raise ValueError('dks_train_mode=module_head requires DKS to be enabled')
+        if self.dks_enabled:
+            if not self.share_kp:
+                raise ValueError('DKS currently requires model.share_kp=True')
+            if self.ktha_enabled or self.glskf_enabled:
+                raise ValueError(
+                    'DKS must not be combined with KTHA or GLSKF in the same run'
+                )
+            if self.kp_mode == 'kpconv':
+                raise ValueError("DKS does not support kp_mode='kpconv'")
+            if cfg.model.kp_influence == 'mlp':
+                raise ValueError("DKS requires kernel influence, not kp_influence='mlp'")
+            if self.dks_mode == 'learned' and cfg.model.kp_influence == 'constant':
+                raise ValueError(
+                    "learned DKS requires linear or gaussian influence; "
+                    "constant influence has no differentiable scale path"
+                )
+            if not self.dks_stages:
+                raise ValueError('dks_stages must contain at least one stage')
+            if len(set(self.dks_stages)) != len(self.dks_stages):
+                raise ValueError('dks_stages must not contain duplicates')
+            if any(stage < 1 or stage > self.num_layers for stage in self.dks_stages):
+                raise ValueError('Every DKS stage must exist in the encoder')
 
         # This context path is independent of the pyramid sampling method.
         self.fa_enabled = bool(getattr(cfg.model, 'fa_enabled', False))
@@ -383,6 +446,32 @@ class KPNeXt(nn.Module):
                     C, layer_C[l+1], conv_r, conv_sig, cfg,
                     use_mod=self._pool_uses_kernel_attention(use_conv))
                 setattr(self, 'pooling_{:d}'.format(layer), pooling_i)
+
+        self.dks = None
+        if self.dks_enabled:
+            self.dks = nn.ModuleDict()
+            for stage in self.dks_stages:
+                block_list = getattr(self, 'encoder_{:d}'.format(stage))
+                if not block_list or not isinstance(
+                    block_list[0], KPNextMultiShortcutBlock
+                ):
+                    raise ValueError(
+                        'DKS stage {:d} does not start with a KPConv block'.format(
+                            stage
+                        )
+                    )
+                # Keep scratch baselines aligned: adding DKS must not consume
+                # the global stream used later to initialize decoder/head weights.
+                with torch.random.fork_rng(devices=[]):
+                    self.dks[str(stage)] = DynamicKernelScale(
+                        in_channels=block_list[0].in_channels,
+                        hidden_dim=self.dks_hidden_dim,
+                        alpha_min=self.dks_alpha_min,
+                        alpha_max=self.dks_alpha_max,
+                        mode=self.dks_mode,
+                        fixed_alpha=self.dks_fixed_alpha,
+                        seed=int(getattr(cfg.exp, 'seed', 0)) + stage * 100003,
+                    )
 
         self.ktha_signature = None
         if self.ktha_enabled:
@@ -549,6 +638,7 @@ class KPNeXt(nn.Module):
         self._configure_fast_adapter_training()
         self._configure_ktha_training()
         self._configure_glskf_training()
+        self._configure_dks_training()
         return
 
     def _configure_fast_adapter_training(self):
@@ -599,6 +689,25 @@ class KPNeXt(nn.Module):
             ):
                 parameter.requires_grad = True
 
+    def _configure_dks_training(self):
+        """Freeze the backbone for DKS/head screening controls."""
+
+        if self.dks_train_mode == 'joint':
+            return
+        if self.fa_enabled and self.fa_train_mode != 'joint':
+            raise ValueError('FastAdapter-only and DKS-only training cannot be combined')
+        if self.ktha_train_mode != 'joint' or self.glskf_train_mode != 'joint':
+            raise ValueError('DKS-only training cannot be combined with another module-only policy')
+
+        for parameter in self.parameters():
+            parameter.requires_grad = False
+        for name, parameter in self.named_parameters():
+            if name.startswith('head.') or (
+                self.dks_train_mode == 'module_head'
+                and name.startswith('dks.')
+            ):
+                parameter.requires_grad = True
+
     def train(self, mode=True):
         """Keep the frozen backbone, including BN statistics, in eval mode."""
 
@@ -626,6 +735,16 @@ class KPNeXt(nn.Module):
                     child_module.eval()
             if self.glskf_train_mode == 'module_head':
                 self.glskf.train(True)
+            self.head.train(True)
+        if mode and self.dks_train_mode in {'module_head', 'head_only'}:
+            allowed = {'head'}
+            if self.dks_train_mode == 'module_head':
+                allowed.add('dks')
+            for child_name, child_module in self.named_children():
+                if child_name not in allowed:
+                    child_module.eval()
+            if self.dks_train_mode == 'module_head':
+                self.dks.train(True)
             self.head.train(True)
         return self
 
@@ -868,6 +987,9 @@ class KPNeXt(nn.Module):
         self._runtime_monitoring_enabled = bool(enabled)
         if self.fast_adapter is not None:
             self.fast_adapter.set_diagnostics_mode(summary=enabled, full=False)
+        if self.dks is not None:
+            for module in self.dks.values():
+                module.set_diagnostics(enabled and self.dks_log_stats)
 
     def runtime_monitoring_stats(self):
         stats = {}
@@ -875,6 +997,14 @@ class KPNeXt(nn.Module):
             stats.update(self.fast_adapter.diagnostics())
         if self.glskf is not None and self.glskf.last_stats:
             stats['glskf'] = dict(self.glskf.last_stats)
+        if self.dks is not None:
+            dks_stats = {
+                int(stage): dict(module.last_stats)
+                for stage, module in self.dks.items()
+                if module.last_stats
+            }
+            if dks_stats:
+                stats['dks'] = dks_stats
         return stats
 
     def litept_serialization_profile(self):
@@ -936,6 +1066,16 @@ class KPNeXt(nn.Module):
         )
         return skip_feats
 
+    def _clear_shared_kp_runtime(self):
+        """Drop batch-specific KP geometry while preserving fixed kernel points."""
+
+        if not self.share_kp:
+            return
+        for shared in self.shared_kp:
+            shared.pop('infl_w', None)
+            shared.pop('neighb_p', None)
+            shared.pop('neighb_1nn', None)
+
     def forward(
         self,
         batch,
@@ -943,6 +1083,11 @@ class KPNeXt(nn.Module):
         return_intermediates=False,
         capture_adapter_details=False,
     ):
+
+        # A failed or interrupted prior forward must never leave geometry that a
+        # same-shaped later batch could consume.  Producers repopulate these
+        # dictionaries during the encoder; GLSKF validates its refined stage.
+        self._clear_shared_kp_runtime()
 
         # Serialization is shared by all attention blocks in a stage, but must
         # be rebuilt for each new batch because point coordinates change.
@@ -1032,6 +1177,22 @@ class KPNeXt(nn.Module):
             else:
                 upcut = None
                 stage_kernel_signature = kernel_signature
+                stage_alpha = None
+                if self.dks_enabled and layer in self.dks_stages:
+                    # The intervention is an explicit configuration; training
+                    # always uses the configured base DKS mode.
+                    dks_ablation = (
+                        self.dks_inference_ablation
+                        if not self.training
+                        else 'none'
+                    )
+                    stage_alpha = self.dks[str(layer)](
+                        feats,
+                        batch.in_dict.lengths[l],
+                        ablation=dks_ablation,
+                    )
+                    if return_intermediates:
+                        trace.setdefault('dks_alpha', {})[layer] = stage_alpha.detach()
                 if (
                     stage_kernel_signature is not None
                     and self.ktha_enabled
@@ -1043,6 +1204,7 @@ class KPNeXt(nn.Module):
                         batch.in_dict.lengths[l],
                         self.ktha_signature_ablation,
                     )
+                first_kp_block = True
                 for block in block_list:
                     if isinstance(block, (LitePointTransformerBlock, LiteHandoverBlock)):
                         block_signature = None
@@ -1062,7 +1224,19 @@ class KPNeXt(nn.Module):
                             kernel_signature=block_signature,
                         )
                     else:
-                        feats, upcut = block(batch.in_dict.points[l], batch.in_dict.points[l], feats, batch.in_dict.neighbors[l], batch.in_dict.lengths[l], upcut=upcut)
+                        block_scale = None
+                        if stage_alpha is not None and first_kp_block:
+                            block_scale = stage_alpha
+                        first_kp_block = False
+                        feats, upcut = block(
+                            batch.in_dict.points[l],
+                            batch.in_dict.points[l],
+                            feats,
+                            batch.in_dict.neighbors[l],
+                            batch.in_dict.lengths[l],
+                            upcut=upcut,
+                            kernel_scale=block_scale,
+                        )
 
             if self.ktha_enabled and layer == self.ktha_source_stage:
                 cached_geometry = self.shared_kp[l] if self.share_kp else None
@@ -1169,6 +1343,10 @@ class KPNeXt(nn.Module):
         #  ------ Head ------
 
         logits = self.head(feats)
+
+        # The autograd graph retains tensors it needs; the shared dictionaries
+        # do not need to pin the completed batch's geometry between forwards.
+        self._clear_shared_kp_runtime()
                 
 
         if verbose:

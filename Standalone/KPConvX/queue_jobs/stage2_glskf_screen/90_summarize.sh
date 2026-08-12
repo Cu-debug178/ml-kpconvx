@@ -3,7 +3,8 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 RESULTS_DIR="${SCRIPT_DIR}/results"
 ROOT="${RESULTS_DIR}/glskf_stage2_screen_20260812"
-"${SCRIPT_DIR}/tools/summarize_stage2_glskf_screen.py" \
+PYTHON_BIN="${KP_CONVX_PYTHON:-/root/autodl-tmp/envs/pointcept/bin/python}"
+"${PYTHON_BIN}" "${SCRIPT_DIR}/tools/summarize_stage2_glskf_screen.py" \
     --root "${ROOT}" \
     --run l0_head "${RESULTS_DIR}/s3dis_glskf_l0_head_from210_bf16_b24_lr5e3_wd001_warm10_identity_seed57106803" \
     --run true "${RESULTS_DIR}/s3dis_glskf_kernel_gate_true_from210_bf16_b24_lr5e3_wd001_warm10_identity_seed57106803" \

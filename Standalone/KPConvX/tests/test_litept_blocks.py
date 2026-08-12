@@ -380,6 +380,66 @@ class KernelGeometryHandoverTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "signature ablation mode"):
             ablate_packed_signature(signature, lengths, "unknown")
 
+    def test_signature_shuffle_does_not_advance_global_rng(self):
+        signature = torch.arange(14, dtype=torch.float32).reshape(7, 2)
+        lengths = torch.tensor([5, 2])
+        torch.manual_seed(71)
+        expected = torch.rand(4)
+        torch.manual_seed(71)
+        shuffle_packed_signature(signature, lengths)
+        self.assertTrue(torch.equal(torch.rand(4), expected))
+
+    def test_v1_shadow_neighbors_contribute_nothing(self):
+        torch.manual_seed(72)
+        points = torch.randn(6, 3) * 0.1
+        producer = KernelOccupancySignature(
+            shell_sizes=[1, 4],
+            radius=0.4,
+            sigma=0.3,
+            influence_mode="constant",
+        )
+        real = torch.stack([torch.arange(6), torch.arange(6)], dim=1)
+        padded = torch.cat([real, torch.full((6, 1), 6)], dim=1)
+        self.assertTrue(
+            torch.allclose(
+                producer(points, points, real),
+                producer(points, points, padded),
+                atol=1e-6,
+                rtol=1e-6,
+            )
+        )
+
+    def test_v1_cached_geometry_matches_recomputed(self):
+        torch.manual_seed(73)
+        points = torch.randn(6, 3) * 0.1
+        neighbors = torch.tensor(
+            [
+                [0, 1, 6],
+                [1, 0, 2],
+                [2, 1, 3],
+                [3, 2, 4],
+                [4, 3, 5],
+                [5, 4, 6],
+            ]
+        )
+        producer = KernelOccupancySignature(
+            shell_sizes=[1, 4], radius=0.4, sigma=0.3
+        )
+        influence, nearest_kernel, _ = producer._assign_geometry(
+            points, points, neighbors
+        )
+        expected = producer(points, points, neighbors)
+        cached = producer(
+            points,
+            points,
+            neighbors,
+            cached_geometry={
+                "infl_w": influence,
+                "neighb_1nn": nearest_kernel,
+            },
+        )
+        self.assertTrue(torch.allclose(cached, expected, atol=1e-6, rtol=1e-6))
+
     def test_occupancy_can_reuse_the_models_exact_kernel_basis(self):
         kernel_points = torch.tensor(
             [
@@ -553,6 +613,46 @@ class KernelGeometryHandoverTests(unittest.TestCase):
             kernel_signature=signature.mean(0, keepdim=True).expand_as(signature),
         )
         self.assertFalse(torch.allclose(actual, expected))
+        self.assertTrue(torch.allclose(zeros, expected, atol=2e-5, rtol=2e-5))
+        self.assertTrue(torch.allclose(constant, expected, atol=2e-5, rtol=2e-5))
+
+    def test_v1_relation_bias_zero_and_constant_signatures_are_null(self):
+        torch.manual_seed(74)
+        points = torch.randn(11, 3)
+        features = torch.randn(11, 48)
+        lengths = torch.tensor([5, 6])
+        baseline = SerializedPointROPEAttention(
+            channels=48,
+            num_heads=2,
+            patch_size=4,
+            geometry_mode="none",
+        ).eval()
+        candidate = SerializedPointROPEAttention(
+            channels=48,
+            num_heads=2,
+            patch_size=4,
+            geometry_mode="relation_bias",
+            geometry_signature_dim=5,
+            geometry_relation_dim=3,
+        ).eval()
+        candidate.load_state_dict(baseline.state_dict(), strict=False)
+        with torch.no_grad():
+            candidate.ktha["bias_scale"]["value"].fill_(0.7)
+        expected = baseline(points, features, lengths, voxel_size=0.2)
+        zeros = candidate(
+            points,
+            features,
+            lengths,
+            voxel_size=0.2,
+            kernel_signature=torch.zeros(11, 5),
+        )
+        constant = candidate(
+            points,
+            features,
+            lengths,
+            voxel_size=0.2,
+            kernel_signature=torch.full((11, 5), 0.2),
+        )
         self.assertTrue(torch.allclose(zeros, expected, atol=2e-5, rtol=2e-5))
         self.assertTrue(torch.allclose(constant, expected, atol=2e-5, rtol=2e-5))
 

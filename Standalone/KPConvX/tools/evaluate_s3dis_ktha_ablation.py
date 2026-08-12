@@ -219,6 +219,9 @@ def main() -> int:
         disabled_names, original_scales = disable_ktha_branch(network)
 
     device = init_gpu(args.gpu)
+    # Architecture construction consumes different RNG amounts across KTHA
+    # variants.  Keep subsequent sampling aligned with the requested seed.
+    set_seed(args.seed)
     amp_settings = resolve_mixed_precision(cfg.train, device)
     network.to(device)
     network.eval()

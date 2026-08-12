@@ -28,6 +28,7 @@ from utils.printing import underline
 from utils.mixed_precision import autocast_context
 from utils.training_schedule import optimizer_step_monitor_due
 from utils.training_monitor import (append_fast_adapter_monitor,
+                                    append_dks_monitor,
                                     append_optimization_monitor,
                                     capture_parameter_samples,
                                     collect_parameter_statistics,
@@ -248,6 +249,13 @@ def training_epoch(
                             global_step,
                             monitor_adapter,
                         )
+                        if monitor_adapter.get('dks'):
+                            append_dks_monitor(
+                                cfg.exp.log_dir,
+                                epoch,
+                                global_step,
+                                monitor_adapter['dks'],
+                            )
                 
                 # zero the parameter gradients
                 optimizer.zero_grad()
@@ -503,5 +511,4 @@ def training_epoch_debug(epoch, net, optimizer, training_loader, cfg, PID_file, 
     all_cuda_stats = np.array(all_cuda_stats, dtype=np.float32)
     
     return all_cuda_stats
-
 

@@ -44,6 +44,13 @@ These are descriptive single-checkpoint contrasts. They do not estimate seed
 variance or statistical significance. `branch_off` uses a backbone co-trained
 with KTHA and is not equivalent to evaluating the original L0 checkpoint.
 
+This table describes the promoted M1 `concat` checkpoint. For V1
+`relation_bias`, zero or any patch-constant signature adds only a row-constant
+attention bias, which softmax removes. Consequently `zero`, `room_mean`, and a
+disabled relation-bias branch are structural nulls for that mode and must not be
+reported as three independent mechanism controls. The existing `matched_mlp`
+also matches the `relation_bias` parameter budget, not M1 `concat` capacity.
+
 ## Launch after GPU mode is enabled
 
 Run the launcher with the local dataset root:

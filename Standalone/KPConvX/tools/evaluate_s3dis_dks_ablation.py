@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate same-checkpoint GLSKF interventions on deterministic Area_5 rooms."""
+"""Evaluate same-checkpoint DKS interventions on deterministic Area_5 rooms."""
 
 from __future__ import annotations
 
@@ -22,23 +22,24 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+
 MODES = (
     "baseline",
+    "init_identity",
     "true",
-    "shuffled",
+    "identity",
+    "shuffle",
     "room_mean",
-    "zero_context",
-    "neutral_gate",
-    "branch_off",
+    "random",
 )
 DEFINITIONS = {
-    "baseline": "external L0 epoch-210 reference with GLSKF disabled; not a same-checkpoint intervention",
-    "true": "unaltered deep semantic context and learned kernel gate",
-    "shuffled": "deep context rows permuted inside each packed room",
-    "room_mean": "every refined point receives its room mean deep context",
-    "zero_context": "deep context replaced by zero before gate generation",
-    "neutral_gate": "kernel gate forced to one while the residual KPConvD remains",
-    "branch_off": "GLSKF residual branch disabled by returning the refined skip unchanged",
+    "baseline": "external L0 reference with DKS disabled; not a same-checkpoint intervention",
+    "init_identity": "L0 checkpoint loaded into freshly initialized learned DKS; pre-training identity check",
+    "true": "learned per-point scales without intervention",
+    "identity": "all DKS scales forced to one",
+    "shuffle": "learned scales shuffled independently inside each packed room",
+    "room_mean": "every point receives its packed-room mean learned scale",
+    "random": "learned scales replaced by private-RNG uniform random scales",
 }
 
 
@@ -70,28 +71,61 @@ def write_json_atomic(path: Path, payload: dict) -> None:
 
 
 def configure_model_intervention(cfg, mode: str):
-    """Apply a GLSKF evaluation mode without leaving an invalid train policy."""
+    """Apply one DKS evaluation mode without leaving a training-only policy."""
 
-    source_glskf_mode = str(getattr(cfg.model, "glskf_mode", "none")).lower()
+    source_mode = str(getattr(cfg.model, "dks_mode", "none")).lower()
     if mode == "baseline":
-        # A GLSKF run commonly records module_head.  Once the module is disabled
-        # that policy is invalid, even though evaluation does not train anything.
-        cfg.model.glskf_mode = "none"
-        cfg.model.glskf_context_control = "none"
-        cfg.model.glskf_inference_ablation = "none"
-        cfg.model.glskf_train_mode = "joint"
+        cfg.model.dks_mode = "none"
+        cfg.model.dks_inference_ablation = "none"
+        cfg.model.dks_train_mode = "joint"
         return cfg
-
-    if source_glskf_mode == "none":
-        raise ValueError("GLSKF intervention requires a GLSKF source configuration")
-    cfg.model.glskf_context_control = "none"
-    # The report-facing name is ``shuffled``; the model config uses the
-    # singular ``shuffle`` token. Keep the public artifact names stable while
-    # translating to the validated internal enum.
-    config_mode = {"shuffled": "shuffle"}.get(mode, mode)
-    cfg.model.glskf_inference_ablation = config_mode if mode != "true" else "none"
-    cfg.model.glskf_train_mode = "joint"
+    if mode == "init_identity":
+        if source_mode != "none":
+            raise ValueError("init_identity requires a DKS-disabled source configuration")
+        cfg.model.dks_mode = "learned"
+        cfg.model.dks_stages = "3"
+        cfg.model.dks_hidden_dim = 32
+        cfg.model.dks_alpha_min = 0.5
+        cfg.model.dks_alpha_max = 1.2
+        cfg.model.dks_fixed_alpha = 1.0
+        cfg.model.dks_inference_ablation = "none"
+        cfg.model.dks_train_mode = "joint"
+        cfg.model.dks_log_stats = True
+        return cfg
+    if source_mode == "none":
+        raise ValueError("DKS intervention requires a DKS source configuration")
+    cfg.model.dks_inference_ablation = "none" if mode == "true" else mode
+    cfg.model.dks_train_mode = "joint"
     return cfg
+
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def align_legacy_encoder_with_checkpoint(cfg, state_dict: dict) -> None:
+    """Infer whether early LitePT stages use KPConvD from checkpoint keys.
+
+    Some early L0 parameter files predate the explicit legacy flag even though
+    their checkpoint contains KPConvD early stages.  The checkpoint is the
+    primary source: KPConvX early blocks contain ``alpha_mlp`` parameters,
+    whereas KPConvD blocks do not.
+    """
+
+    if not bool(getattr(cfg.model, "litept_enabled", False)):
+        return
+    conv_stages = int(getattr(cfg.model, "litept_conv_stages", 0))
+    prefixes = tuple("encoder_{}.".format(stage) for stage in range(1, conv_stages + 1))
+    early_keys = [key for key in state_dict if key.startswith(prefixes)]
+    if not early_keys:
+        return
+    cfg.model.litept_legacy_kpconvd_encoder = not any(
+        ".conv.alpha_mlp." in key for key in early_keys
+    )
 
 
 def main() -> int:
@@ -113,7 +147,11 @@ def main() -> int:
         print("Completed result already exists; skipping: {}".format(output_dir))
         return 0
     if output_dir.exists():
-        raise RuntimeError("incomplete output directory requires manual diagnosis: {}".format(output_dir))
+        raise RuntimeError(
+            "incomplete output directory requires manual diagnosis: {}".format(
+                output_dir
+            )
+        )
     for path, description in (
         (source_log / "parameters.json", "source parameters"),
         (checkpoint_path, "checkpoint"),
@@ -122,7 +160,7 @@ def main() -> int:
         if not path.exists():
             raise FileNotFoundError("{} not found: {}".format(description, path))
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is required for full Area_5 GLSKF ablation evaluation")
+        raise RuntimeError("CUDA is required for full Area_5 DKS evaluation")
 
     from easydict import EasyDict
     from torch.utils.data import DataLoader
@@ -137,13 +175,11 @@ def main() -> int:
 
     _, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (min(4096, hard_limit), hard_limit))
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
+    set_seed(args.seed)
 
     cfg = load_cfg(str(source_log))
     S3DIR_cfg(cfg, dataset_path=str(dataset_path))
+    configure_model_intervention(cfg, args.mode)
     cfg.train.validation_mode = "full_identity"
     cfg.train.save_best_val_cycle = False
     cfg.test.save_validation_clouds = False
@@ -153,9 +189,6 @@ def main() -> int:
     cfg.exp.seed = args.seed
     cfg.exp.saving = False
     configure_validation_mode(cfg)
-    # configure_validation_mode applies the source training defaults and may
-    # reset model intervention fields. Apply the evaluation intervention last.
-    configure_model_intervention(cfg, args.mode)
 
     output_dir.mkdir(parents=True)
     run_config = {
@@ -179,7 +212,7 @@ def main() -> int:
     dataset.b_lim = cfg.test.batch_limit
     sampler = SceneSegSampler(dataset)
     sampler.N = dataset.get_reg_sampling_size()
-    kwargs = {
+    loader_args = {
         "batch_size": 1,
         "sampler": sampler,
         "collate_fn": SceneSegCollate,
@@ -187,18 +220,32 @@ def main() -> int:
         "pin_memory": True,
     }
     if cfg.test.num_workers > 0:
-        kwargs["prefetch_factor"] = 2
-    loader = DataLoader(dataset, **kwargs)
+        loader_args["prefetch_factor"] = 2
+    loader = DataLoader(dataset, **loader_args)
 
-    network = KPNeXt(cfg)
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    network.load_state_dict(checkpoint["model_state_dict"], strict=True)
+    align_legacy_encoder_with_checkpoint(cfg, checkpoint["model_state_dict"])
+    network = KPNeXt(cfg)
+    if args.mode == "init_identity":
+        incompatible = network.load_state_dict(
+            checkpoint["model_state_dict"], strict=False
+        )
+        missing = list(incompatible.missing_keys)
+        unexpected = list(incompatible.unexpected_keys)
+        if unexpected or not missing or not all(key.startswith("dks.") for key in missing):
+            raise RuntimeError(
+                "L0 checkpoint is not a clean DKS warm start; missing={!r}, unexpected={!r}".format(
+                    missing, unexpected
+                )
+            )
+        run_config["warm_start_missing_keys"] = missing
+        write_json_atomic(output_dir / "run_config.json", run_config)
+    else:
+        network.load_state_dict(checkpoint["model_state_dict"], strict=True)
     device = init_gpu(args.gpu)
-    # Align residual sampling streams after architecture construction.
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
+    # Architecture construction consumes different RNG counts across modes.
+    # Reset here so evaluation sampling is paired across interventions.
+    set_seed(args.seed)
     amp_settings = resolve_mixed_precision(cfg.train, device)
     network.to(device)
     network.eval()

@@ -336,3 +336,57 @@ def append_fast_adapter_monitor(
                 "optimizer_step": optimizer_step,
                 **row,
             })
+
+
+def append_dks_monitor(
+    log_dir: str,
+    epoch: int,
+    optimizer_step: int,
+    diagnostics: Mapping[int, Mapping[str, Any]],
+) -> None:
+    """Append per-stage Dynamic Kernel Scale distribution diagnostics."""
+
+    if not diagnostics:
+        return
+    path = os.path.join(log_dir, "dks_alpha_stats.csv")
+    fieldnames = [
+        "step",
+        "epoch",
+        "stage",
+        "mean",
+        "std",
+        "p05",
+        "p95",
+        "frac_lt_0p9",
+        "frac_gt_1p1",
+        "gate",
+    ]
+    exists = os.path.exists(path)
+    if exists:
+        with open(path, newline="") as stream:
+            existing_header = next(csv.reader(stream), [])
+        if existing_header != fieldnames:
+            raise RuntimeError(
+                "DKS monitor header changed. Use a fresh log directory: " + path
+            )
+    with open(path, "a", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        if not exists:
+            writer.writeheader()
+        for stage, values in sorted(diagnostics.items()):
+            writer.writerow({
+                "step": optimizer_step,
+                "epoch": epoch,
+                "stage": int(stage),
+                "mean": _tensor_to_float(values.get("mean", float("nan"))),
+                "std": _tensor_to_float(values.get("std", float("nan"))),
+                "p05": _tensor_to_float(values.get("p05", float("nan"))),
+                "p95": _tensor_to_float(values.get("p95", float("nan"))),
+                "frac_lt_0p9": _tensor_to_float(
+                    values.get("frac_below_0.9", float("nan"))
+                ),
+                "frac_gt_1p1": _tensor_to_float(
+                    values.get("frac_above_1.1", float("nan"))
+                ),
+                "gate": _tensor_to_float(values.get("gate", float("nan"))),
+            })

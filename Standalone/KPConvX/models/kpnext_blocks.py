@@ -175,19 +175,27 @@ class KPConvD(nn.Module):
         kernel_points = load_kernels(self.radius, self.shell_sizes, dimension=self.dimension, fixed=self.fixed_kernel_points)
         return torch.from_numpy(kernel_points).float()
 
-    @torch.no_grad()
     def get_neighbors_influences(self, q_pts: Tensor,
                                  s_pts: Tensor,
-                                 neighb_inds: Tensor) -> Tensor:
+                                 neighb_inds: Tensor,
+                                 kernel_scale: Tensor = None) -> Tensor:
         """
         Influence function of kernel points on neighbors.
         Args:
             q_points (Tensor): query points (M, 3).
             s_points (Tensor): support points carrying input features (N, 3).
             neighb_inds (LongTensor): neighbor indices of query points among support points (M, H).
+            kernel_scale (Tensor=None): optional (M,) per-query isotropic scale.
+                Only nearest-kernel assignment is treated as non-differentiable;
+                influence weights retain gradients with respect to this scale.
         """
 
         if self.share_kp and not self.first_kp:
+
+            if kernel_scale is not None:
+                raise ValueError(
+                    'kernel_scale must only be given to the first KPConv of a shared-kp layer'
+                )
 
             # We use data already computed from the first KPConv of the layer
             influence_weights = self.shared_kp_data['infl_w']
@@ -196,44 +204,74 @@ class KPConvD(nn.Module):
 
         else:
 
-            # Add a fake point in the last row for shadow neighbors
-            s_pts = torch.cat((s_pts, torch.zeros_like(s_pts[:1, :]) + self.inf), 0)   # (N, 3) -> (N+1, 3)
-
-            # Get neighbor points [n_points, n_neighbors, dim]
-            # neighbors = s_pts[neighb_inds, :]  # (N+1, 3) -> (M, H, 3)
-            neighbors = index_select(s_pts, neighb_inds, dim=0)  # (N+1, 3) -> (M, H, 3)
-
-            # Center every neighborhood
-            neighbors = neighbors - q_pts.unsqueeze(1)  # (M, H, 3)
+            with torch.no_grad():
+                # Add a fake point in the last row for shadow neighbors
+                padded_s_pts = torch.cat(
+                    (s_pts, torch.zeros_like(s_pts[:1, :]) + self.inf), 0
+                )
+                neighbors = index_select(padded_s_pts, neighb_inds, dim=0)
+                # Keep the shared cache in the original, unscaled coordinate system.
+                neighbors = neighbors - q_pts.unsqueeze(1)
 
             if self.influence_mode == 'mlp':
-                neighbors *= 1 / self.radius   # -> (M, H, 3)
+                if kernel_scale is not None:
+                    raise ValueError("kernel_scale is incompatible with influence_mode='mlp'")
+                neighbors = neighbors * (1 / self.radius)
                 neighbors_1nn = None
                 influence_weights = None
 
             else:
+                if kernel_scale is None:
+                    # Preserve the original arithmetic exactly when DKS is off.
+                    with torch.no_grad():
+                        differences = neighbors.unsqueeze(2) - self.kernel_points
+                        sq_distances = torch.sum(differences ** 2, dim=3)
+                        nn_sq_dists, neighbors_1nn = torch.min(sq_distances, dim=2)
+                        influence_weights = None
+                        if self.influence_mode == 'linear':
+                            influence_weights = torch.clamp(
+                                1 - torch.sqrt(nn_sq_dists) / self.sigma, min=0.0
+                            )
+                        elif self.influence_mode == 'gaussian':
+                            influence_weights = radius_gaussian(
+                                nn_sq_dists, self.sigma * 0.3
+                            )
+                        elif self.influence_mode != 'constant':
+                            raise ValueError(
+                                "Unknown influence mode: '{:s}'. Should be 'constant', 'linear', or 'gaussian'".format(
+                                    self.influence_mode
+                                )
+                            )
+                else:
+                    if kernel_scale.ndim != 1 or kernel_scale.shape[0] != neighbors.shape[0]:
+                        raise ValueError('kernel_scale must have one entry per query point')
+                    if not torch.is_floating_point(kernel_scale):
+                        raise ValueError('kernel_scale must be floating point')
+                    scaled = neighbors / kernel_scale.to(neighbors.dtype).view(-1, 1, 1)
+                    with torch.no_grad():
+                        differences = scaled.detach().unsqueeze(2) - self.kernel_points
+                        sq_distances = torch.sum(differences ** 2, dim=3)
+                        neighbors_1nn = torch.argmin(sq_distances, dim=2)
 
-                # Get Kernel point distances to neigbors
-                differences = neighbors.unsqueeze(2) - self.kernel_points  # (M, H, 1, 3) x (K, 3) -> (M, H, K, 3)
-                sq_distances = torch.sum(differences ** 2, dim=3)  # (M, H, K)
-
-                # Get nearest kernel point (M, H), values < K
-                nn_sq_dists, neighbors_1nn = torch.min(sq_distances, dim=2)
-
-                influence_weights = None
-                if self.influence_mode != 'constant':
-
-                    # Get Kernel point influences
-                    if self.influence_mode == 'linear':
-                        # Influence decrease linearly with the distance, and get to zero when d = sigma.
-                        influence_weights = torch.clamp(1 - torch.sqrt(nn_sq_dists) / self.sigma, min=0.0)  # (M, H)
-
-                    elif self.influence_mode == 'gaussian':
-                        # Influence in gaussian of the distance.
-                        gaussian_sigma = self.sigma * 0.3
-                        influence_weights = radius_gaussian(nn_sq_dists, gaussian_sigma)  # (M, H)
-                    else:
-                        raise ValueError("Unknown influence mode: : '{:s}'.  Should be 'constant', 'linear', or 'gaussian'".format(self.influence_mode))
+                    influence_weights = None
+                    if self.influence_mode != 'constant':
+                        selected = self.kernel_points[neighbors_1nn]
+                        nearest_sq = torch.sum((scaled - selected) ** 2, dim=2)
+                        if self.influence_mode == 'linear':
+                            nearest_dist = torch.sqrt(nearest_sq + 1e-12)
+                            influence_weights = torch.clamp(
+                                1 - nearest_dist / self.sigma, min=0.0
+                            )
+                        elif self.influence_mode == 'gaussian':
+                            influence_weights = radius_gaussian(
+                                nearest_sq, self.sigma * 0.3
+                            )
+                        else:
+                            raise ValueError(
+                                "Unknown influence mode: '{:s}'. Should be 'constant', 'linear', or 'gaussian'".format(
+                                    self.influence_mode
+                                )
+                            )
 
             # Share with next kernels if necessary
             if self.share_kp:
@@ -248,7 +286,8 @@ class KPConvD(nn.Module):
                 s_pts: Tensor,
                 s_feats: Tensor,
                 neighb_inds: Tensor,
-                kernel_gate: Tensor = None) -> Tensor:
+                kernel_gate: Tensor = None,
+                kernel_scale: Tensor = None) -> Tensor:
         """
         KPConv forward.
         Args:
@@ -272,7 +311,9 @@ class KPConvD(nn.Module):
         neighbor_feats = index_select(padded_s_feats, neighb_inds, dim=0)
 
         # Get nearest kernel point (M, H) and weights applied to each neighbors (M, H)
-        influence_weights, neighbors, neighbors_1nn = self.get_neighbors_influences(q_pts, s_pts, neighb_inds)
+        influence_weights, neighbors, neighbors_1nn = self.get_neighbors_influences(
+            q_pts, s_pts, neighb_inds, kernel_scale=kernel_scale
+        )
 
         if self.influence_mode == 'mlp':
 
@@ -468,10 +509,10 @@ class KPConvX(nn.Module):
         kernel_points = load_kernels(self.radius, self.shell_sizes, dimension=self.dimension, fixed=self.fixed_kernel_points)
         return torch.from_numpy(kernel_points).float()
 
-    @torch.no_grad()
     def get_neighbors_influences(self, q_pts: Tensor,
                                  s_pts: Tensor,
-                                 neighb_inds: Tensor) -> Tensor:
+                                 neighb_inds: Tensor,
+                                 kernel_scale: Tensor = None) -> Tensor:
         """
         Influence function of kernel points on neighbors.
         Args:
@@ -482,6 +523,11 @@ class KPConvX(nn.Module):
 
         if self.share_kp and not self.first_kp:
 
+            if kernel_scale is not None:
+                raise ValueError(
+                    'kernel_scale must only be given to the first KPConv of a shared-kp layer'
+                )
+
             # We use data already computed from the first KPConv of the layer
             influence_weights = self.shared_kp_data['infl_w']
             neighbors = self.shared_kp_data['neighb_p']
@@ -489,37 +535,69 @@ class KPConvX(nn.Module):
 
         else:
 
-            # Add a fake point in the last row for shadow neighbors
-            s_pts = torch.cat((s_pts, torch.zeros_like(s_pts[:1, :]) + self.inf), 0)   # (N, 3) -> (N+1, 3)
+            with torch.no_grad():
+                padded_s_pts = torch.cat(
+                    (s_pts, torch.zeros_like(s_pts[:1, :]) + self.inf), 0
+                )
+                neighbors = index_select(padded_s_pts, neighb_inds, dim=0)
+                neighbors = neighbors - q_pts.unsqueeze(1)
 
-            # Get neighbor points [n_points, n_neighbors, dim]
-            # neighbors = s_pts[neighb_inds, :]  # (N+1, 3) -> (M, H, 3)
-            neighbors = index_select(s_pts, neighb_inds, dim=0)  # (N+1, 3) -> (M, H, 3)
+            if self.influence_mode == 'mlp':
+                if kernel_scale is not None:
+                    raise ValueError("kernel_scale is incompatible with influence_mode='mlp'")
+                neighbors = neighbors * (1 / self.radius)
+                neighbors_1nn = None
+                influence_weights = None
+            elif kernel_scale is None:
+                with torch.no_grad():
+                    differences = neighbors.unsqueeze(2) - self.kernel_points
+                    sq_distances = torch.sum(differences ** 2, dim=3)
+                    nn_sq_dists, neighbors_1nn = torch.min(sq_distances, dim=2)
+                    influence_weights = None
+                    if self.influence_mode == 'linear':
+                        influence_weights = torch.clamp(
+                            1 - torch.sqrt(nn_sq_dists) / self.sigma, min=0.0
+                        )
+                    elif self.influence_mode == 'gaussian':
+                        influence_weights = radius_gaussian(
+                            nn_sq_dists, self.sigma * 0.3
+                        )
+                    elif self.influence_mode != 'constant':
+                        raise ValueError(
+                            "Unknown influence mode: '{:s}'. Should be 'constant', 'linear', or 'gaussian'".format(
+                                self.influence_mode
+                            )
+                        )
+            else:
+                if kernel_scale.ndim != 1 or kernel_scale.shape[0] != neighbors.shape[0]:
+                    raise ValueError('kernel_scale must have one entry per query point')
+                if not torch.is_floating_point(kernel_scale):
+                    raise ValueError('kernel_scale must be floating point')
+                scaled = neighbors / kernel_scale.to(neighbors.dtype).view(-1, 1, 1)
+                with torch.no_grad():
+                    differences = scaled.detach().unsqueeze(2) - self.kernel_points
+                    sq_distances = torch.sum(differences ** 2, dim=3)
+                    neighbors_1nn = torch.argmin(sq_distances, dim=2)
 
-            # Center every neighborhood
-            neighbors = neighbors - q_pts.unsqueeze(1)  # (M, H, 3)
-
-            # Get Kernel point distances to neigbors
-            differences = neighbors.unsqueeze(2) - self.kernel_points  # (M, H, 1, 3) x (K, 3) -> (M, H, K, 3)
-            sq_distances = torch.sum(differences ** 2, dim=3)  # (M, H, K)
-
-            # Get nearest kernel point (M, H), values < K
-            nn_sq_dists, neighbors_1nn = torch.min(sq_distances, dim=2)
-
-            influence_weights = None
-            if self.influence_mode != 'constant':
-
-                # Get Kernel point influences
-                if self.influence_mode == 'linear':
-                    # Influence decrease linearly with the distance, and get to zero when d = sigma.
-                    influence_weights = torch.clamp(1 - torch.sqrt(nn_sq_dists) / self.sigma, min=0.0)  # (M, H)
-
-                elif self.influence_mode == 'gaussian':
-                    # Influence in gaussian of the distance.
-                    gaussian_sigma = self.sigma * 0.3
-                    influence_weights = radius_gaussian(nn_sq_dists, gaussian_sigma)  # (M, H)
-                else:
-                    raise ValueError("Unknown influence mode: : '{:s}'.  Should be 'constant', 'linear', or 'gaussian'".format(self.influence_mode))
+                influence_weights = None
+                if self.influence_mode != 'constant':
+                    selected = self.kernel_points[neighbors_1nn]
+                    nearest_sq = torch.sum((scaled - selected) ** 2, dim=2)
+                    if self.influence_mode == 'linear':
+                        nearest_dist = torch.sqrt(nearest_sq + 1e-12)
+                        influence_weights = torch.clamp(
+                            1 - nearest_dist / self.sigma, min=0.0
+                        )
+                    elif self.influence_mode == 'gaussian':
+                        influence_weights = radius_gaussian(
+                            nearest_sq, self.sigma * 0.3
+                        )
+                    else:
+                        raise ValueError(
+                            "Unknown influence mode: '{:s}'. Should be 'constant', 'linear', or 'gaussian'".format(
+                                self.influence_mode
+                            )
+                        )
 
             # Share with next kernels if necessary
             if self.share_kp:
@@ -533,7 +611,8 @@ class KPConvX(nn.Module):
     def forward(self, q_pts: Tensor,
                 s_pts: Tensor,
                 s_feats: Tensor,
-                neighb_inds: Tensor) -> Tensor:
+                neighb_inds: Tensor,
+                kernel_scale: Tensor = None) -> Tensor:
         """
         KPTransformer forward.
         Args:
@@ -596,7 +675,9 @@ class KPConvX(nn.Module):
         # *********************
 
         # Get nearest kernel point (M, H) and weights applied to each neighbors (M, H)
-        influence_weights, neighbors, neighbors_1nn = self.get_neighbors_influences(q_pts, s_pts, neighb_inds)
+        influence_weights, neighbors, neighbors_1nn = self.get_neighbors_influences(
+            q_pts, s_pts, neighb_inds, kernel_scale=kernel_scale
+        )
 
         # Collect nearest kernel point weights (M, K, C) -> (M, H, C)
         neighbors_weights = torch.gather(conv_weights, 1, neighbors_1nn.unsqueeze(2).expand(-1, -1, self.channels))
@@ -1149,13 +1230,16 @@ class KPNextMultiShortcutBlock(nn.Module):
 
         return
 
-    def forward(self, q_pts, s_pts, s_feats, neighbor_indices, q_lengths, upcut=None):
+    def forward(self, q_pts, s_pts, s_feats, neighbor_indices, q_lengths,
+                upcut=None, kernel_scale=None):
 
         # Get downcut here
         downcut = s_feats
 
         # First depthwise convolution
-        x = self.conv(q_pts, s_pts, s_feats, neighbor_indices)
+        x = self.conv(
+            q_pts, s_pts, s_feats, neighbor_indices, kernel_scale=kernel_scale
+        )
         x = self.conv_norm(x)
         x = self.activation(x)
 
@@ -1201,6 +1285,4 @@ class KPNextMultiShortcutBlock(nn.Module):
         q_feats = self.activation(x)
 
         return q_feats, upcut
-
-
 

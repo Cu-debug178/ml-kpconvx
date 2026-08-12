@@ -16,9 +16,10 @@ Two properties are load-bearing for the experiments this module exists for:
    per-channel ``scale`` starts at zero.  An L0 checkpoint therefore keeps its
    logits bit-for-bit, and ``scale`` frozen at zero is a free causal control.
 
-The gate itself is initialised in its normal ``1 + tanh(raw)`` regime rather
-than at zero, otherwise the first optimizer steps would see no gate gradient at
-all and the module would begin its life as a plain residual convolution.
+The gate starts in its normal ``1 + tanh(raw)`` regime so the correction is
+non-trivial and the outer ``scale`` receives a useful first-step gradient.  The
+gate parameters themselves begin receiving gradients only after ``scale`` has
+moved away from zero.
 """
 
 from __future__ import annotations
@@ -58,16 +59,26 @@ __all__ = [
 
 
 def shuffle_packed_rows(features: Tensor, lengths: Tensor) -> Tensor:
-    """Permute rows inside each packed cloud, never across clouds."""
+    """Permute rows inside each packed cloud without advancing global RNG."""
 
     shuffled = torch.empty_like(features)
     start = 0
-    for length in lengths.detach().cpu().tolist():
-        length = int(length)
-        if length > 0:
-            permutation = torch.randperm(length, device=features.device)
-            shuffled[start:start + length] = features[start:start + length][permutation]
-        start += length
+    cuda_devices = []
+    if features.is_cuda:
+        device_index = features.device.index
+        if device_index is None:
+            device_index = torch.cuda.current_device()
+        cuda_devices = [device_index]
+    # fork_rng restores the CPU/CUDA generators on exit.  The intervention is
+    # still random for the current RNG state, but true and shuffled arms leave
+    # the subsequent model/data RNG stream aligned.
+    with torch.random.fork_rng(devices=cuda_devices):
+        for length in lengths.detach().cpu().tolist():
+            length = int(length)
+            if length > 0:
+                permutation = torch.randperm(length, device=features.device)
+                shuffled[start:start + length] = features[start:start + length][permutation]
+            start += length
     if start != features.shape[0]:
         raise ValueError("sum(lengths) must match the number of rows")
     return shuffled
@@ -337,6 +348,18 @@ class GlskfFeedback(nn.Module):
             gamma, beta = film.chunk(2, dim=1)
             correction = refine_feats * torch.tanh(gamma) + beta
         else:
+            if self.conv.share_kp and not self.conv.first_kp:
+                cached_assignment = self.conv.shared_kp_data.get("neighb_1nn")
+                if cached_assignment is None:
+                    raise RuntimeError(
+                        "GLSKF requires the refined-stage KP assignment from the current forward"
+                    )
+                if tuple(cached_assignment.shape) != tuple(neighb_inds.shape):
+                    raise RuntimeError(
+                        "GLSKF cached KP assignment shape {} does not match neighbors {}".format(
+                            tuple(cached_assignment.shape), tuple(neighb_inds.shape)
+                        )
+                    )
             if self.inference_ablation == "neutral_gate":
                 gate = torch.ones(
                     (refine_feats.shape[0], self.num_kernels, self.groups),

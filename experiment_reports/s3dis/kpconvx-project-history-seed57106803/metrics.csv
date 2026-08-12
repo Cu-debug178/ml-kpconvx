@@ -1,0 +1,70 @@
+dataset,phase,experiment,status,protocol,checkpoint_or_epoch,metric,value,unit,comparison,source
+S3DIS,baseline,KPConvX-L,completed,10-vote full-cloud,450,miou,71.4,percent,early baseline,experiment_reports/s3dis/kpconvx-l-area5-seed57106803
+S3DIS,baseline,LitePT-L0,completed,10-vote full-cloud,210,miou,72.1,percent,primary baseline peak,experiment_reports/s3dis/litept-l0-450-seed57106803
+S3DIS,baseline,LitePT-L0,completed,10-vote full-cloud,450,miou,71.7,percent,final checkpoint,experiment_reports/s3dis/litept-l0-450-seed57106803
+S3DIS,baseline,LitePT-L0,completed,10-vote full-cloud,33 checkpoints,miou_min,69.7,percent,checkpoint range,experiment_reports/s3dis/litept-l0-450-seed57106803
+S3DIS,baseline,LitePT-L0,completed,10-vote full-cloud,33 checkpoints,miou_max,72.1,percent,checkpoint range,experiment_reports/s3dis/litept-l0-450-seed57106803
+S3DIS,baseline,LitePT-L0,completed,10-vote full-cloud,33 checkpoints,miou_mean,71.53,percent,checkpoint range,experiment_reports/s3dis/litept-l0-450-seed57106803
+S3DIS,baseline,LitePT-L0D,completed,10-vote full-cloud,150,miou,71.8,percent,light decoder best tested,experiment_reports/s3dis/litept-l0d-250-seed57106803
+S3DIS,baseline,LitePT-L1,completed,10-vote full-cloud,130,miou,69.6,percent,light depth best tested,experiment_reports/s3dis/litept-l1-250-seed57106803
+S3DIS,baseline,LitePT-L2-no-rope,completed,10-vote full-cloud,120,miou,68.7,percent,best observed checkpoint,Standalone/KPConvX/results/s3dis_litept_l2_no_rope_250_seed57106803/eval_all_checkpoints/manifest.csv
+S3DIS,baseline,LitePT-L2-no-rope,completed,10-vote full-cloud,250,miou,68.5,percent,final checkpoint,Standalone/KPConvX/results/s3dis_litept_l2_no_rope_250_seed57106803/eval_all_checkpoints/manifest.csv
+S3DIS,diagnostic,L0-stage1-fixed10,completed,fixed 10 rooms,450,miou,70.941941,percent,not standard full-cloud,experiment_reports/s3dis/l0-epoch450-stage1-fixed10-20260811
+S3DIS,diagnostic,L0-stage1-fixed10,completed,fixed 10 rooms,450,oa,90.251469,percent,not standard full-cloud,experiment_reports/s3dis/l0-epoch450-stage1-fixed10-20260811
+S3DIS,diagnostic,L0-stage1-fixed10,completed,fixed 10 rooms,stage3,patch_kp_overlap,0.829830,ratio,stage 3,experiment_reports/s3dis/l0-epoch450-stage1-fixed10-20260811
+S3DIS,diagnostic,L0-stage1-fixed10,completed,fixed 10 rooms,stage3,kp_edge_cut,0.170170,ratio,stage 3,experiment_reports/s3dis/l0-epoch450-stage1-fixed10-20260811
+S3DIS,diagnostic,L0-stage1-fixed10,completed,fixed 10 rooms,stage4,kp_edge_cut,0.045367,ratio,stage 4,experiment_reports/s3dis/l0-epoch450-stage1-fixed10-20260811
+S3DIS,diagnostic,L0-stage1-fixed10,completed,fixed 10 rooms,stage2,token_kernel_entropy,0.698169,ratio,descriptive,experiment_reports/s3dis/l0-epoch450-stage1-fixed10-20260811
+S3DIS,diagnostic,L0-stage1-fixed10,completed,fixed 10 rooms,stage2,error_entropy_spearman_point,0.020410,coefficient,near zero,experiment_reports/s3dis/l0-epoch450-stage1-fixed10-20260811
+S3DIS,diagnostic,L0-stage1-fixed10,completed,fixed 10 rooms,stage2,error_entropy_spearman_token,0.024544,coefficient,near zero,experiment_reports/s3dis/l0-epoch450-stage1-fixed10-20260811
+S3DIS,diagnostic,L0-stage1-fixed10,completed,fixed 10 rooms,stage3,attention_residual_ratio,0.339664,ratio,first block,experiment_reports/s3dis/l0-epoch450-stage1-fixed10-20260811
+S3DIS,diagnostic,L0-stage1-fixed10,completed,fixed 10 rooms,stage3,mlp_residual_ratio,11.207277,ratio,first block,experiment_reports/s3dis/l0-epoch450-stage1-fixed10-20260811
+S3DIS,KTHA-V1,M1-concat,completed,full_identity warm10,6,miou,71.307692,percent,best epoch,Standalone/KPConvX/results/stage2_ktha_screen_summary_20260811.csv
+S3DIS,KTHA-V1,M1-concat,completed,full_identity warm10,10,miou,70.823077,percent,final warm10,Standalone/KPConvX/results/stage2_ktha_screen_summary_20260811.csv
+S3DIS,KTHA-V1,M2-QK,completed,full_identity warm10,1,miou,71.184615,percent,best epoch,Standalone/KPConvX/results/stage2_ktha_screen_summary_20260811.csv
+S3DIS,KTHA-V1,M2-QK,completed,full_identity warm10,10,miou,70.984615,percent,final warm10,Standalone/KPConvX/results/stage2_ktha_screen_summary_20260811.csv
+S3DIS,KTHA-V1,M3-relation,completed,full_identity warm10,3,miou,71.223077,percent,best epoch,Standalone/KPConvX/results/stage2_ktha_screen_summary_20260811.csv
+S3DIS,KTHA-V1,M3-relation-shuffled,completed,full_identity warm10,3,miou,71.261538,percent,best epoch,Standalone/KPConvX/results/stage2_ktha_screen_summary_20260811.csv
+S3DIS,KTHA-V1,matched-MLP,completed,full_identity warm10,3,miou,71.061538,percent,best epoch,Standalone/KPConvX/results/stage2_ktha_screen_summary_20260811.csv
+S3DIS,KTHA-V1,M1-concat,completed,full_identity joint20,7,miou_true,71.4538,percent,best true,Standalone/KPConvX/results/stage2_ktha_m1_joint20_control_20260811.csv
+S3DIS,KTHA-V1,M1-concat,completed,full_identity joint20,7,miou_shuffled,71.7000,percent,best shuffled,Standalone/KPConvX/results/stage2_ktha_m1_joint20_control_20260811.csv
+S3DIS,KTHA-V1,M1-concat,completed,full_identity joint20,20,miou_true,71.1385,percent,final true,Standalone/KPConvX/results/stage2_ktha_m1_joint20_control_20260811.csv
+S3DIS,KTHA-V1,M1-concat,completed,full_identity joint20,20,miou_shuffled,71.0615,percent,final shuffled,Standalone/KPConvX/results/stage2_ktha_m1_joint20_control_20260811.csv
+S3DIS,KTHA-V1,M1-concat,completed,same checkpoint intervention,7,true,71.447526,percent,reference,Standalone/KPConvX/results/s3dis_ktha_m1_jointbest_inference_ablations_20260812/summary.csv
+S3DIS,KTHA-V1,M1-concat,completed,same checkpoint intervention,7,shuffled,71.448276,percent,delta +0.000750 pp,Standalone/KPConvX/results/s3dis_ktha_m1_jointbest_inference_ablations_20260812/summary.csv
+S3DIS,KTHA-V1,M1-concat,completed,same checkpoint intervention,7,zero,71.451541,percent,delta +0.004015 pp,Standalone/KPConvX/results/s3dis_ktha_m1_jointbest_inference_ablations_20260812/summary.csv
+S3DIS,KTHA-V1,M1-concat,completed,same checkpoint intervention,7,room_mean,71.443162,percent,delta -0.004364 pp,Standalone/KPConvX/results/s3dis_ktha_m1_jointbest_inference_ablations_20260812/summary.csv
+S3DIS,KTHA-V1,M1-concat,completed,same checkpoint intervention,7,branch_off,71.452649,percent,delta +0.005123 pp,Standalone/KPConvX/results/s3dis_ktha_m1_jointbest_inference_ablations_20260812/summary.csv
+S3DIS,KTHA-V1,M1-concat,completed,10-vote full-cloud,joint-best,miou_true,71.869348,percent,vs L0 -0.230652 pp,local test report
+S3DIS,KTHA-V1,M1-concat,completed,10-vote full-cloud,joint-best,miou_shuffled_trained,72.344162,percent,vs true +0.474815 pp,local test report
+S3DIS,KTHA-V1,M1-concat,partial,full_identity e180,4,validation_rows,4,count,Standalone/KPConvX/results/stage3_ktha_m1_e180_queue_20260811
+S3DIS,KTHA-V2,pairwise-bias,completed,full_identity warm10,10,miou_true,71.035988,percent,best true,Standalone/KPConvX/results/stage2_ktha_v2_warm10_screen.csv
+S3DIS,KTHA-V2,pairwise-bias,completed,full_identity warm10,1,miou_shuffled,71.245288,percent,best shuffled,Standalone/KPConvX/results/stage2_ktha_v2_warm10_screen.csv
+S3DIS,KTHA-V2,matched-MLP,completed,full_identity warm10,8,miou,71.243080,percent,best matched,Standalone/KPConvX/results/stage2_ktha_v2_warm10_screen.csv
+S3DIS,KTHA-V2,pairwise-bias,completed,full_identity warm10,10,mean_miou_true,70.915385,percent,10 epoch mean,Standalone/KPConvX/results/stage2_ktha_v2_warm10_screen.csv
+S3DIS,KTHA-V2,pairwise-bias,completed,full_identity warm10,10,mean_miou_shuffled,71.016923,percent,10 epoch mean,Standalone/KPConvX/results/stage2_ktha_v2_warm10_screen.csv
+S3DIS,KTHA-V2,pairwise-bias,completed,full_identity warm10,10,true_minus_shuffled,-0.101538,percentage_points,below +0.3 gate,Standalone/KPConvX/results/stage2_ktha_v2_warm10_screen.csv
+S3DIS,GLSKF,l0-head,completed,full_identity warm10,2,miou_best,71.276923,percent,best epoch,Standalone/KPConvX/results/glskf_stage2_screen_20260812/warm10_summary.csv
+S3DIS,GLSKF,l0-head,completed,full_identity warm10,10,miou_mean,71.128462,percent,10 epoch mean,Standalone/KPConvX/results/glskf_stage2_screen_20260812/warm10_summary.csv
+S3DIS,GLSKF,kernel-gate-true,completed,full_identity warm10,2,miou_best,71.215385,percent,below L0 head,Standalone/KPConvX/results/glskf_stage2_screen_20260812/warm10_summary.csv
+S3DIS,GLSKF,kernel-gate-true,completed,full_identity warm10,10,miou_mean,70.865385,percent,10 epoch mean,Standalone/KPConvX/results/glskf_stage2_screen_20260812/warm10_summary.csv
+S3DIS,GLSKF,kernel-gate-shuffled,completed,full_identity warm10,2,miou_best,71.238462,percent,best epoch,Standalone/KPConvX/results/glskf_stage2_screen_20260812/warm10_summary.csv
+S3DIS,GLSKF,kernel-gate-shuffled,completed,full_identity warm10,10,miou_mean,70.890769,percent,10 epoch mean,Standalone/KPConvX/results/glskf_stage2_screen_20260812/warm10_summary.csv
+S3DIS,GLSKF,room-mean,completed,full_identity warm10,6,miou_best,71.200000,percent,best epoch,Standalone/KPConvX/results/glskf_stage2_screen_20260812/warm10_summary.csv
+S3DIS,GLSKF,room-mean,completed,full_identity warm10,10,miou_mean,70.903077,percent,10 epoch mean,Standalone/KPConvX/results/glskf_stage2_screen_20260812/warm10_summary.csv
+S3DIS,GLSKF,matched-MLP,completed,full_identity warm10,6,miou_best,71.200000,percent,best epoch,Standalone/KPConvX/results/glskf_stage2_screen_20260812/warm10_summary.csv
+S3DIS,GLSKF,matched-MLP,completed,full_identity warm10,10,miou_mean,70.871538,percent,10 epoch mean,Standalone/KPConvX/results/glskf_stage2_screen_20260812/warm10_summary.csv
+S3DIS,GLSKF,kernel-gate-true,completed,full_identity warm10,2,true_minus_l0_head,-0.061538,percentage_points,paired at true best epoch,Standalone/KPConvX/results/glskf_stage2_screen_20260812/warm10_summary.json
+S3DIS,GLSKF,kernel-gate-true,completed,full_identity warm10,2,true_minus_shuffled,-0.023077,percentage_points,below +0.3 gate,Standalone/KPConvX/results/glskf_stage2_screen_20260812/warm10_summary.json
+S3DIS,GLSKF,kernel-gate-true,completed,full_identity warm10,10,true_minus_l0_head_mean,-0.263077,percentage_points,paired 10 epoch mean,Standalone/KPConvX/results/glskf_stage2_screen_20260812/warm10_summary.csv
+S3DIS,GLSKF,kernel-gate-true,completed,full_identity warm10,10,true_minus_shuffled_mean,-0.025385,percentage_points,paired 10 epoch mean,Standalone/KPConvX/results/glskf_stage2_screen_20260812/warm10_summary.csv
+S3DIS,GLSKF-B1,kernel-gate-true-scratch,running,full_identity e180,71,completed_epochs,71,count,snapshot 2026-08-12; not final,local checkpoint and val_IoUs.txt
+S3DIS,GLSKF-B1,kernel-gate-true-scratch,running,full_identity e180,59,miou_best_so_far,65.627807,percent,snapshot 2026-08-12; process metric,local best_val_chkp.tar
+ScanObjectNN,prelude,KPConvX-L,completed,10-vote,epoch199,oa,89.3,percent,best observed,experiment_reports/scanobjectnn/full-checkpoint-study-seed57106803
+ScanObjectNN,prelude,KPConvX-L,completed,10-vote,epoch199,macc,88.2,percent,best observed,experiment_reports/scanobjectnn/full-checkpoint-study-seed57106803
+ScanObjectNN,prelude,KPConvX-L+FastAdapter,completed,10-vote,epoch190,oa,88.7,percent,reference,experiment_reports/scanobjectnn/full-checkpoint-study-seed57106803
+ScanObjectNN,prelude,KPConvX-L+FastAdapter,completed,10-vote,epoch190,macc,87.3,percent,reference,experiment_reports/scanobjectnn/full-checkpoint-study-seed57106803
+ScanObjectNN,prelude,KPConvD-L,completed,10-vote,epoch249,macc,87.3,percent,reference,experiment_reports/scanobjectnn/full-checkpoint-study-seed57106803
+ScanObjectNN,prelude,KPConvD-L,completed,10-vote,epoch249,oa,88.9,percent,reference,experiment_reports/scanobjectnn/full-checkpoint-study-seed57106803
+ScanObjectNN,prelude,KPConvD-L+FastAdapter,completed,10-vote,epoch250,oa,89.1,percent,reference,experiment_reports/scanobjectnn/full-checkpoint-study-seed57106803
+ScanObjectNN,prelude,KPConvD-L+FastAdapter,completed,10-vote,epoch250,macc,87.8,percent,reference,experiment_reports/scanobjectnn/full-checkpoint-study-seed57106803

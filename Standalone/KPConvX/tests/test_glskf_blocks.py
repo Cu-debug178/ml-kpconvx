@@ -301,6 +301,15 @@ class PackedControlTests(unittest.TestCase):
         )
         self.assertEqual(sorted(shuffled[5:, 0].tolist()), [5.0, 6.0])
 
+    def test_shuffle_does_not_advance_global_rng(self):
+        lengths = torch.tensor([5, 2])
+        features = torch.arange(7, dtype=torch.float32).unsqueeze(1)
+        torch.manual_seed(61)
+        expected = torch.rand(4)
+        torch.manual_seed(61)
+        shuffle_packed_rows(features, lengths)
+        self.assertTrue(torch.equal(torch.rand(4), expected))
+
     def test_room_mean_keeps_the_cloud_mean_and_drops_positions(self):
         lengths = torch.tensor([2, 3])
         features = torch.tensor(
@@ -786,10 +795,25 @@ class GlskfKPNeXtIntegrationTests(unittest.TestCase):
         model.eval()
         model(batch)
         refine_l = cfg.model.glskf_refine_stage - 1
-        assignment = model.shared_kp[refine_l]["neighb_1nn"]
-        self.assertIsNotNone(assignment)
-        self.assertEqual(assignment.shape[0], batch.in_dict.points[refine_l].shape[0])
-        self.assertTrue(int(assignment.max()) < model.glskf.num_kernels)
+        # Runtime geometry is consumed inside this forward and released before
+        # returning, so a same-shaped future batch cannot reuse it.
+        self.assertNotIn("neighb_1nn", model.shared_kp[refine_l])
+        self.assertNotIn("infl_w", model.shared_kp[refine_l])
+        self.assertNotIn("neighb_p", model.shared_kp[refine_l])
+
+    def test_stale_shared_geometry_is_cleared_before_forward(self):
+        torch.manual_seed(29)
+        cfg = _make_config("kernel_gate")
+        model = KPNeXt(cfg).eval()
+        refine_l = cfg.model.glskf_refine_stage - 1
+        model.shared_kp[refine_l]["neighb_1nn"] = torch.full(
+            (1, 1), model.glskf.num_kernels + 3, dtype=torch.long
+        )
+        model.shared_kp[refine_l]["infl_w"] = torch.ones(1, 1)
+        model.shared_kp[refine_l]["neighb_p"] = torch.ones(1, 1, 3)
+        logits = model(_make_batch())
+        self.assertTrue(torch.isfinite(logits).all())
+        self.assertNotIn("neighb_1nn", model.shared_kp[refine_l])
 
     def test_single_stage_contexts_run_end_to_end(self):
         torch.manual_seed(28)

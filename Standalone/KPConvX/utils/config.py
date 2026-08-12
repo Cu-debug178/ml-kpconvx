@@ -186,6 +186,17 @@ def init_cfg():
     cfg.model.glskf_deep_residual = False         # Bool, also feed the deep context in as conv features
     cfg.model.glskf_train_mode = 'joint'          # Str, joint/module_head/head_only
 
+    # Dynamic Kernel Scale (DKS). Disabled for baseline parity.
+    cfg.model.dks_mode = 'none'                   # Str, none/learned/fixed/random
+    cfg.model.dks_stages = '3'                    # Str, comma-separated 1-based KPConv stages
+    cfg.model.dks_hidden_dim = 32                 # Int, alpha predictor hidden width
+    cfg.model.dks_alpha_min = 0.5                 # Float, lower alpha bound
+    cfg.model.dks_alpha_max = 1.2                 # Float, upper alpha bound
+    cfg.model.dks_fixed_alpha = 1.0               # Float, alpha for fixed mode
+    cfg.model.dks_inference_ablation = 'none'     # Str, none/identity/shuffle/room_mean/random
+    cfg.model.dks_train_mode = 'joint'            # Str, joint/module_head/head_only
+    cfg.model.dks_log_stats = True                # Bool, log per-stage alpha diagnostics
+
     cfg.model.process_ratio = 1.0       # Float, ratio between the radius of processed volume and the radius of the input volume
     cfg.model.n_frames = 1              #   Int, number of frames used (Specific to SLAM)
 
