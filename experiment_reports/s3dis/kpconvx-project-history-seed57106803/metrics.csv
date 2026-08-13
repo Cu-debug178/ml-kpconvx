@@ -71,7 +71,7 @@ S3DIS,GLSKF-B1,kernel-gate-true-scratch,completed,same checkpoint intervention,8
 S3DIS,DKS,init-identity,completed,paired full_identity preflight,L0 epoch210,confusion_equal,1,boolean,exact L0 identity,local preflight summary
 S3DIS,DKS,learned,completed,100-step preflight,L0 epoch210,gate_final,0.112953,scalar,implementation readiness only,local preflight summary
 S3DIS,DKS,learned,completed,100-step preflight,L0 epoch210,alpha_std_final,0.007550,scalar,small movement; not mechanism benefit,local preflight summary
-S3DIS,DKS,phase-a,running,full_identity warm10,3 seeds x 6 arms,completed_jobs,1,count,snapshot 2026-08-13 08:16 +08:00,local queue status
+S3DIS,DKS,phase-a,running,full_identity warm10,3 seeds x 6 arms,verified_completed_jobs,2,count,snapshot 2026-08-13 14:21 +08:00; job 03 retry active after archived environment interruption,local queue status
 ScanObjectNN,prelude,KPConvX-L,completed,10-vote,epoch199,oa,89.3,percent,best observed,experiment_reports/scanobjectnn/full-checkpoint-study-seed57106803
 ScanObjectNN,prelude,KPConvX-L,completed,10-vote,epoch199,macc,88.2,percent,best observed,experiment_reports/scanobjectnn/full-checkpoint-study-seed57106803
 ScanObjectNN,prelude,KPConvX-L+FastAdapter,completed,10-vote,epoch190,oa,88.7,percent,reference,experiment_reports/scanobjectnn/full-checkpoint-study-seed57106803

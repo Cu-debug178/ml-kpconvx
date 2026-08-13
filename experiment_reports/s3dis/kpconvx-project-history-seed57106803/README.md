@@ -80,7 +80,7 @@ checkpoint-selection bias。所有主要结果只有 seed `57106803`，不能估
 | KTHA V2 warm10 | 去除 semantic bypass 后重筛 | completed | 是，未晋级 |
 | GLSKF warm10 五路筛选 | 测试深层语义到 KP kernel gate | completed | 是，否定性筛选证据 |
 | GLSKF B1 scratch e180 | 排除 L0 warm-start 对新模块联合学习的约束 | completed，含 10-vote 和同 checkpoint 干预 | 是，否定性证据 |
-| DKS Phase-A | 测试逐点动态 kernel scale 是否优于固定尺度和随机尺度 | preflight completed，3 seed × 6 arm 运行中 | 尚未，当前只有实现可用性证据 |
+| DKS Phase-A | 测试逐点动态 kernel scale 是否优于固定尺度和随机尺度 | preflight completed；18 项队列中 2 项已核验成功，第 3 项首次环境中断后正在重跑 | 尚未，当前只有实现可用性证据 |
 
 ### 3.1 KPConvX-L 基线
 
@@ -377,8 +377,11 @@ Phase-A 使用 3 个 seed（`57106803`、`12345`、`98765`）和 6 个实验臂�
 GPU 预检已经完成：L0 与 fresh DKS `alpha=1` 的 full-room confusion 和 mIoU 精确一致；
 100-step learned run 的 gate 从 0 移到 `0.112953`，最终 alpha std 为 `0.007550`。
 这证明恒等初始化、梯度路径、checkpoint 和诊断产物可用，但 alpha 变化仍小，也不证明
-DKS 有性能收益。截至 `2026-08-13 08:16 +08:00`，正式 Phase-A 队列完成 `1/18`，
-第 2 个 arm 完成 `8/10` 个 epoch，仍在运行；完整结果出来前不做模型收益判断。
+DKS 有性能收益。截至 `2026-08-13 14:21 +08:00`，正式 Phase-A 队列有 `2/18` 项通过
+完整产物核验；第 3 项 `fixed_0.8 / seed57106803` 已从同一个 L0 epoch-210 checkpoint
+重新开始，当前约在第 6/10 轮。此前第 3 项首次运行只留下 3 行验证记录，已完整归档并
+标记为环境中断，不能作为正式结果；之后一次错误 Python 环境因缺少 `easydict` 在导入
+阶段失败，也不属于模型结果。完整队列结束前不做 DKS 性能收益判断。
 
 ## 8. 目前能得出的结论
 
@@ -399,7 +402,8 @@ DKS 有性能收益。截至 `2026-08-13 08:16 +08:00`，正式 Phase-A 队列�
    低 `5.298868` 和约 `5.245813` pp，scratch 训练没有产生正收益。
 8. B1 同 checkpoint 的 true/shuffled/room-mean/zero-context 几乎不变，但 branch-off
    严重下降；模型依赖 correction branch，却没有可检测的对齐深层上下文依赖。
-9. DKS 预检证明实现与恒等 warm-start 可用；Phase-A 尚未完成，性能结论未知。
+9. DKS 预检证明实现与恒等 warm-start 可用；Phase-A 当前仅有 2/18 项通过核验，
+   性能结论未知。
 10. L0D 的 light decoder 仍达到 `71.8%`，而 L1/L2 的轻量深度或无 PointROPE 结果
    更低；说明不能只按“更轻”推断更好。
 
@@ -446,6 +450,8 @@ DKS 有性能收益。截至 `2026-08-13 08:16 +08:00`，正式 Phase-A 队列�
   `0.01`；原 L0 为 batch 12/accum 2、bf16 关闭、weight decay `0.05`。
 - 训练期间有中断/恢复和失败启动；队列脚本会保存 per-job 日志、exit code、时间和
   GPU/内存/磁盘快照，并对独立任务继续执行；依赖任务则在上游产物不可用时跳过。
+  DKS Phase-A 还记录了一次环境重启导致的半成品归档，以及一次解释器缺少
+  `easydict` 的启动失败；这些均不计入模型性能比较。
 
 ## 10.1 早期 ScanObjectNN 对照
 

@@ -50,7 +50,15 @@ done
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 RESULTS_DIR="${PROJECT_DIR}/results"
 RUN_DIR="${RESULTS_DIR}/${RUN_NAME}"
-PYTHON_BIN="${KP_CONVX_PYTHON:-python3}"
+# Prefer the environment used by the completed DKS/L0 runs.  Set
+# KP_CONVX_PYTHON explicitly when reproducing on another machine.
+if [[ -n "${KP_CONVX_PYTHON:-}" ]]; then
+    PYTHON_BIN="${KP_CONVX_PYTHON}"
+elif [[ -x "/root/autodl-tmp/envs/pointcept/bin/python" ]]; then
+    PYTHON_BIN="/root/autodl-tmp/envs/pointcept/bin/python"
+else
+    PYTHON_BIN="python3"
+fi
 DATASET_PATH="${S3DIS_DATASET_PATH:-<DATASET_PATH>}"
 FINETUNE_PATH="${DKS_L0_CHECKPOINT:-<L0_EPOCH210_CHECKPOINT>}"
 
@@ -71,6 +79,10 @@ fi
     exit 75
 }
 [[ -x "${PYTHON_BIN}" ]] || { printf 'Python not found: %s\n' "${PYTHON_BIN}" >&2; exit 66; }
+"${PYTHON_BIN}" -c 'import torch, easydict' >/dev/null 2>&1 || {
+    printf 'Python environment lacks required torch/easydict imports: %s\n' "${PYTHON_BIN}" >&2
+    exit 66
+}
 [[ -d "${DATASET_PATH}/Area_5" ]] || { printf 'S3DIS Area_5 not found\n' >&2; exit 66; }
 [[ -f "${FINETUNE_PATH}" ]] || { printf 'L0 checkpoint not found: %s\n' "${FINETUNE_PATH}" >&2; exit 66; }
 

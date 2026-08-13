@@ -24,9 +24,11 @@ tools/run_stage2_dks_candidate.sh learned 57106803 \
   stage2_dks_learned_seed57106803 10
 ```
 
-Set `DKS_L0_CHECKPOINT` and `S3DIS_DATASET_PATH`; `KP_CONVX_PYTHON` defaults to
-`python3`. The script skips verified complete output, preserves incomplete
-directories, and writes runtime artifacts only under `results/`.
+Set `DKS_L0_CHECKPOINT` and `S3DIS_DATASET_PATH`; `KP_CONVX_PYTHON` can override
+the interpreter. If unset, the script prefers the project environment used by
+the completed runs and then falls back to `python3`; it checks `torch` and
+`easydict` before starting. The script skips verified complete output, preserves
+incomplete directories, and writes runtime artifacts only under `results/`.
 
 After the one-arm acceptance checks pass, run the reproducible queue with
 `tools/run_stage2_dks_queue.sh`. Reusing the default queue-state directory skips
