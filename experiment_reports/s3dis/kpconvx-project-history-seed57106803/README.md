@@ -1,8 +1,8 @@
-# KPConvX / LitePT / KTHA / GLSKF 项目全程实验总报告
+# KPConvX / LitePT / KTHA / GLSKF / DKS 项目全程实验总报告
 
 ## 0. 报告范围和读法
 
-本报告整理从项目最初的模型路线判断，到截至 `2026-08-12` 的训练、诊断、
+本报告整理从项目最初的模型路线判断，到截至 `2026-08-13` 的训练、诊断、
 模块筛选和后续队列状态。主实验数据集是 S3DIS Area 5；早期工程还包含
 ScanObjectNN main split 的对照实验，因此相关结果也一并记录。
 
@@ -79,7 +79,8 @@ checkpoint-selection bias。所有主要结果只有 seed `57106803`，不能估
 | M1 e180 | 低学习率长训尝试 | partial，只有 4 行 | 否 |
 | KTHA V2 warm10 | 去除 semantic bypass 后重筛 | completed | 是，未晋级 |
 | GLSKF warm10 五路筛选 | 测试深层语义到 KP kernel gate | completed | 是，否定性筛选证据 |
-| GLSKF B1 scratch e180 | 排除 L0 warm-start 对新模块联合学习的约束 | running，快照为 63/180 epoch | 尚未，只有过程指标 |
+| GLSKF B1 scratch e180 | 排除 L0 warm-start 对新模块联合学习的约束 | completed，含 10-vote 和同 checkpoint 干预 | 是，否定性证据 |
+| DKS Phase-A | 测试逐点动态 kernel scale 是否优于固定尺度和随机尺度 | preflight completed，3 seed × 6 arm 运行中 | 尚未，当前只有实现可用性证据 |
 
 ### 3.1 KPConvX-L 基线
 
@@ -268,7 +269,7 @@ true kernel gate、shuffled context、room_mean context、matched MLP 五路。�
 给 kernel gate 带来短程正收益”。这属于单 seed、warm-start、按最佳 epoch 描述的
 否定性筛选证据，不等价于证明 GLSKF 在所有训练方式下都无效。
 
-### 7.2 当前 B1 scratch 180 epoch：目的和判定范围
+### 7.2 B1 scratch 180 epoch：最终结果和 L0 差距
 
 在 Stage 2 完成后启动了 B1：`kernel_gate + true context` 从随机初始化做 180 epoch
 全模型联合训练，不加载 L0 或其他 checkpoint。配置为 seed `57106803`、300
@@ -281,18 +282,31 @@ decay `0.01`，每个 epoch 做一次 `full_identity` 单视角全量验证；�
 低估模块与主干共同学习的能力。B1 允许 KPConvX/LitePT 主干、Stage 4/5 语义上下文和
 Stage 3 decoder kernel gate 从头协同形成，检验完整训练时的优化可行性和最终性能。
 
-截至 `2026-08-12` 本次快照，B1 已完成 `71/180` 个 epoch；此前核验的最佳确定性
-单视角全量 mIoU 为 epoch 59 的 `65.627807%`。训练仍在运行，这些是
-过程指标，不是最终结论。它们也不能直接和 L0 epoch 210 的 `72.1%` 10-vote 数字
-比较，因为评估协议不同；即使 B1 最终超过已有 L0，单个 true-context scratch run
-也无法排除额外容量、训练调度或优化轨迹解释。
+B1 已完成全部 `180` 个 epoch。训练日志中的最佳 `full_identity` checkpoint 是内部
+epoch 81，mIoU 为 `65.730769%`；epoch 180 为 `65.261538%`。自动 10-vote 使用
+epoch 81 的 best checkpoint，第 10 票 full-cloud mIoU 为 `66.854187%`，投票过程
+最高为 Vote 8 的 `66.927478%`，最终报告按一位小数显示为 `66.9%`。
 
-B1 完成后的正确判定顺序是：先报告最佳单视角全量 checkpoint 的 10-vote 结果；再
-对同一 B1 checkpoint 做 `true/shuffled/room_mean/zero_context/neutral_gate/branch_off`
-干预，判断前向是否真正依赖对齐上下文。若要把收益归因于训练期的空间对应关系，还需
-相同 seed 和训练协议的 scratch baseline、shuffled 或 matched-capacity 对照。现有
-B0 与 B1 的训练协议并非完全匹配，因此只能做探索性性能参考，不能写成严格单变量因果
-消融。
+与 L0 的差距必须按相同协议分别计算：
+
+| 协议 | L0 epoch 210 | B1 epoch 81 | B1-L0 |
+|---|---:|---:|---:|
+| deterministic `full_identity` 单视角 | 71.034802% | 65.735934% | -5.298868 pp |
+| 标准 10-vote full-cloud | 72.1% | 66.854187% | 约 -5.245813 pp |
+
+因此 B1 没有获得性能正收益，从头联合训练也没有支持“L0 warm-start 束缚了 GLSKF，
+scratch 可以释放其收益”的替代解释。但这里仍有方法学边界：L0 来自 450 epoch 训练中
+选出的 epoch 210，B1 是 180 epoch scratch，二者并非严格匹配的 scratch baseline 与
+单变量模块对照，所以不能把全部 `5.25–5.30` pp 差距因果归因于 GLSKF 本身。
+
+对同一 B1 epoch-81 checkpoint 的干预结果为：true `65.735934%`、shuffled
+`65.739424%`、room mean `65.722318%`、zero context `65.703286%`、neutral gate
+`65.662362%`、branch off `24.258799%`。true 与 shuffled 只差 `-0.003490` pp，
+相对 room mean、zero context、neutral gate 也只有 `+0.013616`、`+0.032648`、
+`+0.073572` pp；这些差异远小于预设的 `+0.3` pp 机制门槛。branch off 则下降
+`41.477135` pp，说明模型强烈依赖整个 GLSKF correction branch，但几乎不依赖深层
+上下文与空间位置的正确对应。更准确的结论是：B1 学会了使用该 correction 路径，
+没有证据表明它学会了利用对齐的深层语义来动态调制 kernel geometry。
 
 ### 7.3 静态代码审查后的修复和解释边界
 
@@ -330,11 +344,41 @@ B1 权重轨迹的前提下修复，并由聚焦测试覆盖：
 - 单 seed、Area 5 checkpoint selection 和短筛 best-epoch 选择仍然存在。外部审查
   提到的具体效应量或 seed 方差范围没有本地数据或引用验证，未作为事实写入结论。
 
-B1 后处理等待器已经按训练主脚本 PID、`/proc` start ticks 和最终产物三重条件挂接。
-B1 只有在完成 180 行验证、best/latest checkpoint 和自动 10-vote 报告后，才会开始
-外部 L0 参考及 `true/shuffled/room_mean/zero_context/neutral_gate/branch_off` 六路
-同 checkpoint 干预。外部 L0 与 B1 训练历史不同，只是性能参考；六路 B1 干预才用于
-判断推理时对齐上下文、kernel modulation 和残差分支是否真正被使用。
+B1 后处理按训练主脚本 PID、`/proc` start ticks 和最终产物三重条件核验。180 行验证、
+best/latest checkpoint、自动 10-vote、外部 L0 参考及六路同 checkpoint 干预均已完成。
+后处理曾因 baseline job 缺少执行权限、公开标签 `shuffled` 与内部枚举 `shuffle` 不一致，
+以及验证默认配置覆盖干预字段而失败；修复后只补跑失败项，已有成功结果没有重算或覆盖。
+
+### 7.4 DKS：Dynamic Kernel Scale 新模块
+
+DKS（Dynamic Kernel Scale，动态核尺度）直接作用于 KPConvD/KPConvX 的核几何，而不是
+再增加一种 attention。它为每个 query point 生成一个有界各向同性尺度 `alpha`，在
+保持预计算 KNN 邻居集合不变的情况下，用 `alpha` 除以中心化后的邻居相对坐标，从而
+改变最近 kernel point 分配和 influence weight。当前只作用于 Stage 3 的第一个 KP
+block，尺度范围为 `[0.5, 1.2]`；learned 路径初始化为精确 `alpha=1`，可从 L0 epoch
+210 近似恒等 warm-start。DKS 与 KTHA、GLSKF 在同一 run 中互斥，避免混合机制归因。
+
+Phase-A 使用 3 个 seed（`57106803`、`12345`、`98765`）和 6 个实验臂，每路训练
+10 epoch，并只比较预先指定的 epoch-10 指标，而不是各自挑最佳 epoch：
+
+| arm | 作用 | 要排除的替代解释 |
+|---|---|---|
+| `l0_head` | 不启用 DKS，只训练 L0 head | 优化器重启/head 微调 |
+| `fixed_1.0` | 恒等尺度 | 加入 DKS 代码路径本身 |
+| `fixed_0.8` | 全局缩小核尺度 | 固定半径调优 |
+| `fixed_1.15` | 全局放大核尺度 | 固定半径调优 |
+| `random` | 随机逐点尺度 | 任意扰动或正则化 |
+| `learned` | 特征预测逐点尺度 | 待检验的动态几何机制 |
+
+机制晋级条件不是 learned 单独超过 L0，而是 learned 在多 seed 下同时超过最佳 fixed arm
+和 random，并超过预先声明的噪声门槛。`learned ~= fixed_best` 只支持全局 kernel radius
+调优；`learned ~= random` 则说明随机扰动或正则化仍是充分解释。
+
+GPU 预检已经完成：L0 与 fresh DKS `alpha=1` 的 full-room confusion 和 mIoU 精确一致；
+100-step learned run 的 gate 从 0 移到 `0.112953`，最终 alpha std 为 `0.007550`。
+这证明恒等初始化、梯度路径、checkpoint 和诊断产物可用，但 alpha 变化仍小，也不证明
+DKS 有性能收益。截至 `2026-08-13 08:16 +08:00`，正式 Phase-A 队列完成 `1/18`，
+第 2 个 arm 完成 `8/10` 个 epoch，仍在运行；完整结果出来前不做模型收益判断。
 
 ## 8. 目前能得出的结论
 
@@ -351,7 +395,12 @@ B1 只有在完成 180 行验证、best/latest checkpoint 和自动 10-vote 报�
    和 matched MLP；未达到预设晋级门槛。
 6. GLSKF Stage 2 五路均已完成；true 低于 L0 head，且 true-shuffled 的最佳轮配对差
    为 `-0.023077` pp，没有达到 `+0.3` pp 门槛。
-7. L0D 的 light decoder 仍达到 `71.8%`，而 L1/L2 的轻量深度或无 PointROPE 结果
+7. GLSKF B1 已完成 180 epoch 和 10-vote；相对 L0 在同协议单视角和 10-vote 下分别
+   低 `5.298868` 和约 `5.245813` pp，scratch 训练没有产生正收益。
+8. B1 同 checkpoint 的 true/shuffled/room-mean/zero-context 几乎不变，但 branch-off
+   严重下降；模型依赖 correction branch，却没有可检测的对齐深层上下文依赖。
+9. DKS 预检证明实现与恒等 warm-start 可用；Phase-A 尚未完成，性能结论未知。
+10. L0D 的 light decoder 仍达到 `71.8%`，而 L1/L2 的轻量深度或无 PointROPE 结果
    更低；说明不能只按“更轻”推断更好。
 
 ### 8.2 合理推测
@@ -369,21 +418,21 @@ B1 只有在完成 180 行验证、best/latest checkpoint 和自动 10-vote 报�
 
 - geometry 在其他 seed、数据集、目标 stage、decoder 或 boundary 路径是否有效。
 - shuffled-trained M1 的 `72.344%` 是否可复现，是否只是选择偏差。
-- 当前 B1 scratch 是否会在完整 180 epoch 后反超；现有 63 epoch 过程值不能回答。
-- 若 B1 最终提升，收益来自对齐语义上下文、额外容量还是不同优化轨迹；没有 scratch
-  shuffled/matched 对照前不能归因。
+- B1 的大幅落后中有多少来自 GLSKF、180/450 epoch 时长差异或训练调度差异；没有严格
+  匹配的 scratch L0/shuffled/matched 对照不能分解。
+- DKS learned 是否稳定超过最佳固定尺度和 random；Phase-A 尚未完成。
 - 单 seed、Area 5 复用和不同评估协议下，任何约 `0.1–0.3` pp 差异是否统计显著。
 
 ## 9. 当前决策和建议
 
 1. 不把 M1/V2 直接晋级为 Stage 3 长训候选；KTHA 的当前证据更适合写成“几何
    handover 未被当前实现证实”，而不是“几何没有作用”。
-2. GLSKF 五路 Stage 2 已失败于预设晋级门槛；当前 B1 是专门检验 warm-start 约束
-   假设的探索性 scratch 长训，不应倒推为 GLSKF 已经晋级。
-3. 等 B1 完成自动 10-vote 后，对同一最佳 checkpoint 做上下文/分支干预；若需要
-   训练期因果归因，再补严格匹配的 scratch baseline 和 shuffled/matched control。
-4. 若 GLSKF scratch 也无收益，下一步应优先检查 Stage 3 patch grouping、decoder boundary
-   路径、kernel signature 的可预测性和多 seed 方差，而不是继续变换 Q/K 形式。
+2. GLSKF Stage 2 和 B1 scratch 均无正收益，且空间对齐上下文没有通过干预门槛；不再
+   把现有 GLSKF 作为长训候选，除非出现新的机制证据，而不是仅调整训练时长。
+3. 当前优先完成 DKS 的 3 seed × 6 arm Phase-A。只有 learned 同时超过最佳 fixed 和
+   random，才进入同 checkpoint 干预或更长训练。
+4. 如果 DKS 也未过门槛，下一步优先检查 Stage 3 patch grouping、decoder boundary
+   路径和 kernel 尺度/签名的可预测性，而不是继续变换 Q/K 形式。
 5. 后续候选原则上只有通过预设因果门槛才做 180/250 epoch；最终候选需要独立 checkpoint
    选择、至少 3 seeds 和统一的 10-vote full-cloud 协议。
 
@@ -424,4 +473,5 @@ selection bias；单 seed 差异也不能说明稳定排名。
 - 前置路线和后续计划：[l0-seed57106803-next-diagnostics](../l0-seed57106803-next-diagnostics/)
 - KTHA 设计：[Standalone/KPConvX/tools/KTHA_V2.md](../../../Standalone/KPConvX/tools/KTHA_V2.md)
 - GLSKF 设计：[Standalone/KPConvX/tools/GLSKF_EXPERIMENT.md](../../../Standalone/KPConvX/tools/GLSKF_EXPERIMENT.md)
+- DKS 设计：[Standalone/KPConvX/tools/DKS_EXPERIMENT.md](../../../Standalone/KPConvX/tools/DKS_EXPERIMENT.md)
 - 完整关键数值见同目录 [metrics.csv](metrics.csv)。

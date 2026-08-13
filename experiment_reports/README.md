@@ -11,7 +11,7 @@ in [`docs/EXPERIMENT_FAILURE_MEMORY.md`](../docs/EXPERIMENT_FAILURE_MEMORY.md).
 
 | Dataset | Run | Main result | Status |
 |---|---|---|---|
-| S3DIS Area 5 | [KPConvX project history, seed 57106803](./s3dis/kpconvx-project-history-seed57106803/) | end-to-end timeline; GLSKF Stage 2 completed, B1 scratch e180 running | snapshot |
+| S3DIS Area 5 | [KPConvX project history, seed 57106803](./s3dis/kpconvx-project-history-seed57106803/) | B1 scratch e180 completed without gain; DKS Phase-A running | snapshot |
 | S3DIS Area 5 | [KPConvX-L, seed 57106803](./s3dis/kpconvx-l-area5-seed57106803/) | final 10-vote full-cloud mIoU 71.4% | completed |
 | S3DIS Area 5 | [LitePT L0, seed 57106803](./s3dis/litept-l0-450-seed57106803/) | best tested 10-vote full-cloud mIoU 72.1% at epoch 210 | completed |
 | S3DIS Area 5 | [LitePT L0D, seed 57106803](./s3dis/litept-l0d-250-seed57106803/) | best tested 10-vote full-cloud mIoU 71.8% at epoch 150 | completed |

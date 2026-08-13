@@ -58,8 +58,20 @@ S3DIS,GLSKF,kernel-gate-true,completed,full_identity warm10,2,true_minus_l0_head
 S3DIS,GLSKF,kernel-gate-true,completed,full_identity warm10,2,true_minus_shuffled,-0.023077,percentage_points,below +0.3 gate,Standalone/KPConvX/results/glskf_stage2_screen_20260812/warm10_summary.json
 S3DIS,GLSKF,kernel-gate-true,completed,full_identity warm10,10,true_minus_l0_head_mean,-0.263077,percentage_points,paired 10 epoch mean,Standalone/KPConvX/results/glskf_stage2_screen_20260812/warm10_summary.csv
 S3DIS,GLSKF,kernel-gate-true,completed,full_identity warm10,10,true_minus_shuffled_mean,-0.025385,percentage_points,paired 10 epoch mean,Standalone/KPConvX/results/glskf_stage2_screen_20260812/warm10_summary.csv
-S3DIS,GLSKF-B1,kernel-gate-true-scratch,running,full_identity e180,71,completed_epochs,71,count,snapshot 2026-08-12; not final,local checkpoint and val_IoUs.txt
-S3DIS,GLSKF-B1,kernel-gate-true-scratch,running,full_identity e180,59,miou_best_so_far,65.627807,percent,snapshot 2026-08-12; process metric,local best_val_chkp.tar
+S3DIS,GLSKF-B1,kernel-gate-true-scratch,completed,full_identity e180,180,completed_epochs,180,count,complete validation history,local val_IoUs.txt
+S3DIS,GLSKF-B1,kernel-gate-true-scratch,completed,full_identity e180,81,miou_best,65.730769,percent,best validation checkpoint,local val_IoUs.txt
+S3DIS,GLSKF-B1,kernel-gate-true-scratch,completed,full_identity e180,180,miou_final,65.261538,percent,final epoch,local val_IoUs.txt
+S3DIS,GLSKF-B1,kernel-gate-true-scratch,completed,10-vote full-cloud,81,miou_vote9,66.854187,percent,vs L0 epoch210 approximately -5.245813 pp,local test report
+S3DIS,GLSKF-B1,kernel-gate-true-scratch,completed,same checkpoint intervention,81,miou_true,65.735934,percent,vs external L0 -5.298868 pp,local ablation summary
+S3DIS,GLSKF-B1,kernel-gate-true-scratch,completed,same checkpoint intervention,81,miou_shuffled,65.739424,percent,true minus shuffled -0.003490 pp,local ablation summary
+S3DIS,GLSKF-B1,kernel-gate-true-scratch,completed,same checkpoint intervention,81,miou_room_mean,65.722318,percent,true minus room mean +0.013616 pp,local ablation summary
+S3DIS,GLSKF-B1,kernel-gate-true-scratch,completed,same checkpoint intervention,81,miou_zero_context,65.703286,percent,true minus zero +0.032648 pp,local ablation summary
+S3DIS,GLSKF-B1,kernel-gate-true-scratch,completed,same checkpoint intervention,81,miou_neutral_gate,65.662362,percent,true minus neutral +0.073572 pp,local ablation summary
+S3DIS,GLSKF-B1,kernel-gate-true-scratch,completed,same checkpoint intervention,81,miou_branch_off,24.258799,percent,true minus branch off +41.477135 pp,local ablation summary
+S3DIS,DKS,init-identity,completed,paired full_identity preflight,L0 epoch210,confusion_equal,1,boolean,exact L0 identity,local preflight summary
+S3DIS,DKS,learned,completed,100-step preflight,L0 epoch210,gate_final,0.112953,scalar,implementation readiness only,local preflight summary
+S3DIS,DKS,learned,completed,100-step preflight,L0 epoch210,alpha_std_final,0.007550,scalar,small movement; not mechanism benefit,local preflight summary
+S3DIS,DKS,phase-a,running,full_identity warm10,3 seeds x 6 arms,completed_jobs,1,count,snapshot 2026-08-13 08:16 +08:00,local queue status
 ScanObjectNN,prelude,KPConvX-L,completed,10-vote,epoch199,oa,89.3,percent,best observed,experiment_reports/scanobjectnn/full-checkpoint-study-seed57106803
 ScanObjectNN,prelude,KPConvX-L,completed,10-vote,epoch199,macc,88.2,percent,best observed,experiment_reports/scanobjectnn/full-checkpoint-study-seed57106803
 ScanObjectNN,prelude,KPConvX-L+FastAdapter,completed,10-vote,epoch190,oa,88.7,percent,reference,experiment_reports/scanobjectnn/full-checkpoint-study-seed57106803
