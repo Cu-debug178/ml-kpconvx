@@ -28,7 +28,9 @@ for seed in 57106803 12345 98765; do
         job_index=$((job_index + 1))
         job_path="${QUEUE_DIR}/$(printf '%02d' "${job_index}")_${seed}_${arm//./p}.sh"
         run_name="stage2_dks_${arm//./p}_seed${seed}_e${EPOCHS}"
-        patch_file="$(mktemp)"
+        # Keep the temporary file in the jobs directory so the final rename
+        # is atomic even when /tmp is a different filesystem.
+        patch_file="$(mktemp "${QUEUE_DIR}/.job.XXXXXX")"
         printf '%s\n' \
             '#!/usr/bin/env bash' \
             'set -Eeuo pipefail' \
@@ -36,8 +38,10 @@ for seed in 57106803 12345 98765; do
             'exec "${PROJECT_DIR}/tools/run_stage2_dks_candidate.sh" '"${arm}"' '"${seed}"' '"${run_name}"' '"${EPOCHS}" \
             > "${patch_file}"
         if [[ ! -f "${job_path}" ]] || ! cmp -s "${patch_file}" "${job_path}"; then
-            cp -- "${patch_file}" "${job_path}"
-            chmod 0755 "${job_path}"
+            # Replace the path atomically.  An in-place cp can corrupt a job
+            # script that is already being interpreted by a running queue.
+            chmod 0755 "${patch_file}"
+            mv -f -- "${patch_file}" "${job_path}"
         fi
         rm -f -- "${patch_file}"
         printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
